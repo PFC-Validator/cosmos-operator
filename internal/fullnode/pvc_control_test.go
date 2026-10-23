@@ -5,11 +5,11 @@ import (
 	"errors"
 	"testing"
 
+	cosmosv1 "github.com/bryanlabs/cosmos-operator/api/v1"
+	"github.com/bryanlabs/cosmos-operator/internal/diff"
+	"github.com/bryanlabs/cosmos-operator/internal/kube"
+	"github.com/bryanlabs/cosmos-operator/internal/test"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
-	cosmosv1 "github.com/strangelove-ventures/cosmos-operator/api/v1"
-	"github.com/strangelove-ventures/cosmos-operator/internal/diff"
-	"github.com/strangelove-ventures/cosmos-operator/internal/kube"
-	"github.com/strangelove-ventures/cosmos-operator/internal/test"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -250,7 +250,7 @@ func TestPVCControl_Reconcile(t *testing.T) {
 		require.Equal(t, existing.Name, gotPatch.Name)
 		require.Equal(t, namespace, gotPatch.Namespace)
 		require.Empty(t, gotPatch.Spec.VolumeMode)
-		require.Equal(t, crd.Spec.VolumeClaimTemplate.Resources, gotPatch.Spec.Resources)
+		require.Equal(t, toVolumeResources(crd.Spec.VolumeClaimTemplate.Resources), gotPatch.Spec.Resources)
 	})
 
 	t.Run("updates with unbound volumes", func(t *testing.T) {

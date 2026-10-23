@@ -1,3 +1,5 @@
+# Exposes the manager's own HTTPS metrics endpoint. The port named "https" is defined on the
+# manager container by config/default/manager_auth_proxy_patch.yaml.
 apiVersion: v1
 kind: Service
 metadata:

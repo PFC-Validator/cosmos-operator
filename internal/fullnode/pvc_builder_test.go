@@ -5,11 +5,11 @@ import (
 	"strings"
 	"testing"
 
+	cosmosv1 "github.com/bryanlabs/cosmos-operator/api/v1"
+	"github.com/bryanlabs/cosmos-operator/internal/diff"
+	"github.com/bryanlabs/cosmos-operator/internal/kube"
+	"github.com/bryanlabs/cosmos-operator/internal/test"
 	"github.com/samber/lo"
-	cosmosv1 "github.com/strangelove-ventures/cosmos-operator/api/v1"
-	"github.com/strangelove-ventures/cosmos-operator/internal/diff"
-	"github.com/strangelove-ventures/cosmos-operator/internal/kube"
-	"github.com/strangelove-ventures/cosmos-operator/internal/test"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -66,7 +66,7 @@ func TestBuildPVCs(t *testing.T) {
 			require.Len(t, got.Spec.AccessModes, 1)
 			require.Equal(t, corev1.ReadWriteOnce, got.Spec.AccessModes[0])
 
-			require.Equal(t, crd.Spec.VolumeClaimTemplate.Resources, got.Spec.Resources)
+			require.Equal(t, toVolumeResources(crd.Spec.VolumeClaimTemplate.Resources), got.Spec.Resources)
 			require.Equal(t, "test-storage-class", *got.Spec.StorageClassName)
 			require.Equal(t, corev1.PersistentVolumeFilesystem, *got.Spec.VolumeMode)
 		}
@@ -128,7 +128,7 @@ func TestBuildPVCs(t *testing.T) {
 			require.Len(t, got.Spec.AccessModes, 1)
 			require.Equal(t, corev1.ReadWriteOnce, got.Spec.AccessModes[0])
 
-			require.Equal(t, crd.Spec.VolumeClaimTemplate.Resources, got.Spec.Resources)
+			require.Equal(t, toVolumeResources(crd.Spec.VolumeClaimTemplate.Resources), got.Spec.Resources)
 			require.Equal(t, "test-storage-class", *got.Spec.StorageClassName)
 			require.Equal(t, corev1.PersistentVolumeFilesystem, *got.Spec.VolumeMode)
 		}

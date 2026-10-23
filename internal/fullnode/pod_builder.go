@@ -4,15 +4,17 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 
+	cosmosv1 "github.com/bryanlabs/cosmos-operator/api/v1"
+	"github.com/bryanlabs/cosmos-operator/internal/healthcheck"
+	"github.com/bryanlabs/cosmos-operator/internal/kube"
+	"github.com/bryanlabs/cosmos-operator/internal/version"
 	"github.com/samber/lo"
-	cosmosv1 "github.com/strangelove-ventures/cosmos-operator/api/v1"
-	"github.com/strangelove-ventures/cosmos-operator/internal/healthcheck"
-	"github.com/strangelove-ventures/cosmos-operator/internal/kube"
-	"github.com/strangelove-ventures/cosmos-operator/internal/version"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -95,7 +97,7 @@ func NewPodBuilder(crd *cosmosv1.CosmosFullNode) PodBuilder {
 					Name: "healthcheck",
 					// Available images: https://github.com/orgs/strangelove-ventures/packages?repo_name=cosmos-operator
 					// IMPORTANT: Must use v0.6.2 or later.
-					Image:   "ghcr.io/pfc-validator/cosmos-operator:" + version.DockerTag(),
+					Image:   resolveOperatorImage(),
 					Command: []string{"/manager", "healthcheck", "--rpc-host", fmt.Sprintf("http://localhost:%d", crd.Spec.ChainSpec.Comet.RPCPort())},
 					Ports:   []corev1.ContainerPort{{ContainerPort: healthCheckPort, Protocol: corev1.ProtocolTCP}},
 					Resources: corev1.ResourceRequirements{
@@ -115,7 +117,7 @@ func NewPodBuilder(crd *cosmosv1.CosmosFullNode) PodBuilder {
 		// version check sidecar, runs on inverval in case the instance is halting for upgrade.
 		pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{
 			Name:    "version-check-interval",
-			Image:   "ghcr.io/pfc-validator/cosmos-operator:" + version.DockerTag(),
+			Image:   resolveOperatorImage(),
 			Command: versionCheckCmd,
 			Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
@@ -226,6 +228,7 @@ const (
 	volChainHome = "vol-chain-home" // Stores live chain data and config files.
 	volTmp       = "vol-tmp"        // Stores temporary config files for manipulation later.
 	volConfig    = "vol-config"     // Overlay items from ConfigMap.
+	volNodeKey   = "vol-node-key"   // Node key (p2p identity) projected from a Secret.
 	volSystemTmp = "vol-system-tmp" // Necessary for statesync or else you may see the error: ERR State sync failed err="failed to create chunk queue: unable to create temp dir for state sync chunks: stat /tmp: no such file or directory" module=statesync
 )
 
@@ -264,6 +267,19 @@ func (b PodBuilder) WithOrdinal(ordinal int32) PodBuilder {
 					Items: []corev1.KeyToPath{
 						{Key: configOverlayFile, Path: configOverlayFile},
 						{Key: appOverlayFile, Path: appOverlayFile},
+					},
+				},
+			},
+		},
+		{
+			// The node key is the pod's p2p identity, so it comes from a Secret rather than the
+			// config ConfigMap.
+			Name: volNodeKey,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  NodeKeySecretName(b.crd, ordinal),
+					DefaultMode: ptr(int32(0440)),
+					Items: []corev1.KeyToPath{
 						{Key: nodeKeyFile, Path: nodeKeyFile},
 					},
 				},
@@ -287,6 +303,7 @@ func (b PodBuilder) WithOrdinal(ordinal int32) PodBuilder {
 		pod.Spec.InitContainers[i].VolumeMounts = append(mounts, []corev1.VolumeMount{
 			{Name: volTmp, MountPath: tmpDir},
 			{Name: volConfig, MountPath: tmpConfigDir},
+			{Name: volNodeKey, MountPath: nodeKeyDir},
 		}...)
 	}
 
@@ -305,11 +322,13 @@ func (b PodBuilder) WithOrdinal(ordinal int32) PodBuilder {
 }
 
 const (
-	workDir          = "/home/operator"
-	tmpDir           = workDir + "/.tmp"
-	tmpConfigDir     = workDir + "/.config"
-	infraToolImage   = "ghcr.io/pfc-validator/infra-toolkit"
-	infraToolVersion = "v0.1.8"
+	workDir      = "/home/operator"
+	tmpDir       = workDir + "/.tmp"
+	tmpConfigDir = workDir + "/.config"
+	nodeKeyDir   = workDir + "/.node-key"
+	// Pinned by digest so a reschedule can never pull different code. Bump the tag and digest
+	// together, taking the digest from `crane digest`.
+	infraToolImage = "ghcr.io/pfc-validator/infra-toolkit:v0.1.8"
 
 	// Necessary for statesync
 	systemTmpDir = "/tmp"
@@ -336,7 +355,86 @@ func envVars(crd *cosmosv1.CosmosFullNode) []corev1.EnvVar {
 }
 
 func resolveInfraToolImage() string {
-	return fmt.Sprintf("%s:%s", infraToolImage, infraToolVersion)
+	return infraToolImage
+}
+
+// defaultOperatorImageRepo is the last-resort repository for the version-check containers, used
+// only when the operator cannot determine where its own image came from.
+const defaultOperatorImageRepo = "ghcr.io/pfc-validator/cosmos-operator"
+
+// discoveredOperatorImageRepo holds the repository the operator's own container was pulled from,
+// recorded at startup. This is what makes a fork work without configuration: whoever builds and
+// publishes the operator gets version-check containers from the same place automatically.
+var discoveredOperatorImageRepo atomic.Value
+
+// SetOperatorImageRepo records the repository the running operator image came from. Call it before
+// the manager starts. An empty repo is ignored so a failed lookup cannot erase a good value.
+func SetOperatorImageRepo(repo string) {
+	if repo != "" {
+		discoveredOperatorImageRepo.Store(repo)
+	}
+}
+
+// discoveredOperatorImageRef holds the running operator's own image reference when it is pinned by
+// digest. Version-check containers run that same image, so they reuse the pin rather than a tag
+// that could be moved.
+var discoveredOperatorImageRef atomic.Value
+
+// SetOperatorImage records the image the running operator came from: its repository always, and
+// the full reference too when it is pinned by digest. Call it before the manager starts. An empty
+// image is ignored so a failed lookup cannot erase a good value.
+func SetOperatorImage(image string) {
+	if strings.Contains(image, "@sha256:") {
+		discoveredOperatorImageRef.Store(image)
+	}
+	SetOperatorImageRepo(RepoFromImageRef(image))
+}
+
+// RepoFromImageRef strips the tag or digest from a container image reference, leaving the
+// repository. It accounts for a registry host that carries a port, where the last colon is not a
+// tag separator, e.g. localhost:5000/cosmos-operator.
+func RepoFromImageRef(image string) string {
+	if image == "" {
+		return ""
+	}
+	// A digest reference pins content, so the repo is everything before the "@".
+	if at := strings.Index(image, "@"); at != -1 {
+		return image[:at]
+	}
+	colon := strings.LastIndex(image, ":")
+	if colon == -1 {
+		return image
+	}
+	// Only a colon after the final slash is a tag separator; before it, it is a registry port.
+	if strings.Contains(image[colon+1:], "/") {
+		return image
+	}
+	return image[:colon]
+}
+
+// resolveOperatorImage picks the repository for version-check containers, in order:
+//
+//  1. OPERATOR_IMAGE_REPO, so an operator can always pin it explicitly
+//  2. the running operator's own digest-pinned reference, used as is
+//  3. the repository the running operator image came from, discovered at startup
+//  4. defaultOperatorImageRepo
+//
+// Getting this wrong makes every managed pod request a tag that does not exist, so the discovery
+// step exists to stop that being the default outcome for anyone running a fork.
+func resolveOperatorImage() string {
+	repo := os.Getenv("OPERATOR_IMAGE_REPO")
+	if repo == "" {
+		if ref, ok := discoveredOperatorImageRef.Load().(string); ok {
+			return ref
+		}
+		if v, ok := discoveredOperatorImageRepo.Load().(string); ok {
+			repo = v
+		}
+	}
+	if repo == "" {
+		repo = defaultOperatorImageRepo
+	}
+	return repo + ":" + version.DockerTag()
 }
 
 func initContainers(crd *cosmosv1.CosmosFullNode, moniker string) []corev1.Container {
@@ -411,13 +509,14 @@ set -eu
 CONFIG_DIR="$CHAIN_HOME/config"
 TMP_DIR="$HOME/.tmp/config"
 OVERLAY_DIR="$HOME/.config"
+NODE_KEY_DIR="$HOME/.node-key"
 
-# This is a hack to prevent adding another init container.
-# Ideally, this step is not concerned with merging config, so it would live elsewhere.
-# The node key is a secret mounted into the main "node" container, so we do not need this one.
-echo "Removing node key from chain's init subcommand..."
+# The chain's init subcommand writes its own node key. Replace it with the operator-managed one
+# from the mounted Secret so the p2p identity is stable across pod recreation.
+echo "Replacing node key with the operator-managed key..."
 rm -rf "$CONFIG_DIR/node_key.json"
-cp "$OVERLAY_DIR/node_key.json" "$CONFIG_DIR/node_key.json"
+cp "$NODE_KEY_DIR/node_key.json" "$CONFIG_DIR/node_key.json"
+chmod 600 "$CONFIG_DIR/node_key.json"
 
 echo "Merging config..."
 set -x
@@ -461,7 +560,7 @@ fi
 	// After the status is patched, the pod will be restarted with the correct image.
 	required = append(required, corev1.Container{
 		Name:    "version-check",
-		Image:   "ghcr.io/pfc-validator/cosmos-operator:" + version.DockerTag(),
+		Image:   resolveOperatorImage(),
 		Command: versionCheckCmd,
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{

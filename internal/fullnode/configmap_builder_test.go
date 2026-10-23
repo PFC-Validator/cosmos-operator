@@ -4,16 +4,14 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	_ "embed"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/BurntSushi/toml"
-	cosmosv1 "github.com/strangelove-ventures/cosmos-operator/api/v1"
-	"github.com/strangelove-ventures/cosmos-operator/internal/test"
+	cosmosv1 "github.com/bryanlabs/cosmos-operator/api/v1"
+	"github.com/bryanlabs/cosmos-operator/internal/test"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -92,19 +90,14 @@ func TestBuildConfigMaps(t *testing.T) {
 			require.Equal(t, cms0Data[key], cms1Data[key])
 		}
 
-		nodeKeysFromConfigMap := NodeKeys{}
+		// The node key is identity material and now lives in a Secret, so it must not be
+		// written into the ConfigMap.
 		for _, cmDiff := range cms {
-			currCm := cmDiff.Object()
-
-			nodeKey, nErr := getNodeKeyFromConfigMap(currCm)
-
-			require.NoError(t, nErr)
-
-			nodeKeysFromConfigMap[client.ObjectKey{Name: currCm.Name, Namespace: currCm.Namespace}] = *nodeKey
+			require.NotContains(t, cmDiff.Object().Data, nodeKeyFile)
 		}
 
 		crd.Spec.Type = cosmosv1.FullNode
-		cms2, err := BuildConfigMaps(&crd, nil, nodeKeysFromConfigMap)
+		cms2, err := BuildConfigMaps(&crd, nil, nodeKeys)
 
 		require.NoError(t, err)
 		require.Equal(t, cms, cms2)
@@ -159,19 +152,14 @@ func TestBuildConfigMaps(t *testing.T) {
 			require.Equal(t, cm0Data[key], cm1Data[key])
 		}
 
-		nodeKeysFromConfigMap := NodeKeys{}
+		// The node key is identity material and now lives in a Secret, so it must not be
+		// written into the ConfigMap.
 		for _, cmDiff := range cms {
-			currCm := cmDiff.Object()
-
-			nodeKey, nErr := getNodeKeyFromConfigMap(currCm)
-
-			require.NoError(t, nErr)
-
-			nodeKeysFromConfigMap[client.ObjectKey{Name: currCm.Name, Namespace: currCm.Namespace}] = *nodeKey
+			require.NotContains(t, cmDiff.Object().Data, nodeKeyFile)
 		}
 
 		crd.Spec.Type = cosmosv1.FullNode
-		cms2, err := BuildConfigMaps(&crd, nil, nodeKeysFromConfigMap)
+		cms2, err := BuildConfigMaps(&crd, nil, nodeKeys)
 
 		require.NoError(t, err)
 		require.Equal(t, cms, cms2)
@@ -590,12 +578,9 @@ func TestBuildConfigMaps(t *testing.T) {
 			require.NotEmpty(t, cm.Data)
 			require.Empty(t, cm.BinaryData)
 
-			nodeKey := NodeKey{}
-
-			err = json.Unmarshal([]byte(cm.Data[nodeKeyFile]), &nodeKey)
-			require.NoError(t, err)
-			require.Equal(t, nodeKey.PrivKey.Type, "tendermint/PrivKeyEd25519")
-			require.NotEmpty(t, nodeKey.PrivKey.Value)
+			// Node keys moved to a Secret. Leaking one back into a ConfigMap would undo that,
+			// so assert it is absent rather than merely different.
+			require.NotContains(t, cm.Data, nodeKeyFile)
 		})
 
 		t.Run("with existing", func(t *testing.T) {
@@ -639,8 +624,8 @@ func TestBuildConfigMaps(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 3, len(got))
 
-			nodeKey := got[0].Object().Data["node_key.json"]
-			require.Equal(t, "existing", nodeKey)
+			require.NotContains(t, got[0].Object().Data, nodeKeyFile,
+				"an existing node key must not be copied into the ConfigMap")
 		})
 	})
 
@@ -655,20 +640,4 @@ func TestBuildConfigMaps(t *testing.T) {
 		}
 		return labels
 	})
-}
-
-func getNodeKeyFromConfigMap(cm *corev1.ConfigMap) (*NodeKeyRepresenter, error) {
-	nodeKey := NodeKey{}
-
-	nodeKeyData := []byte(cm.Data[nodeKeyFile])
-
-	err := json.Unmarshal(nodeKeyData, &nodeKey)
-	if err != nil {
-		return nil, err
-	}
-
-	return &NodeKeyRepresenter{
-		NodeKey:          nodeKey,
-		MarshaledNodeKey: nodeKeyData,
-	}, nil
 }

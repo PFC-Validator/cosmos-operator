@@ -507,7 +507,7 @@ type ChainSpec struct {
 
 	// Specify shell (sh) script commands to properly download and save the address book file.
 	// Prefer AddrbookURL if the file is in a conventional format.
-	// The available shell commands are from docker image ghcr.io/strangelove-ventures/infra-toolkit, including wget and curl.
+	// The available shell commands are from docker image ghcr.io/pfc-validator/infra-toolkit, including wget and curl.
 	// Save the file to env var $ADDRBOOK_FILE.
 	// E.g. curl https://url-to-addrbook.com > $ADDRBOOK_FILE
 	// Takes precedence over AddrbookURL.
@@ -530,7 +530,7 @@ type ChainSpec struct {
 
 	// Specify shell (sh) script commands to properly download and save the genesis file.
 	// Prefer GenesisURL if the file is in a conventional format.
-	// The available shell commands are from docker image ghcr.io/strangelove-ventures/infra-toolkit, including wget and curl.
+	// The available shell commands are from docker image ghcr.io/pfc-validator/infra-toolkit, including wget and curl.
 	// Save the file to env var $GENESIS_FILE.
 	// E.g. curl https://url-to-genesis.com | jq '.genesis' > $GENESIS_FILE
 	// Takes precedence over GenesisURL.
@@ -557,7 +557,7 @@ type ChainSpec struct {
 
 	// Specify shell (sh) script commands to properly download and process a snapshot archive.
 	// Prefer SnapshotURL if possible.
-	// The available shell commands are from docker image ghcr.io/strangelove-ventures/infra-toolkit, including wget and curl.
+	// The available shell commands are from docker image ghcr.io/pfc-validator/infra-toolkit, including wget and curl.
 	// Save the file to env var $GENESIS_FILE.
 	// Takes precedence over SnapshotURL.
 	// Hint: Use "set -eux" in your script.
