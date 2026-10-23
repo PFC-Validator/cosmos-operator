@@ -1,43 +1,7 @@
 # Namespaced Role for the canary operator: everything the reconcile path
 # needs, scoped to the canary namespace ONLY. This is the blast-radius wall -
 # no ClusterRole, so a misbehaving canary operator cannot touch production
-# namespaces. cosmosfullnodes -> canarycosmosfullnodes vs the generated
-# ClusterRole; jobs/leases dropped (no StatefulJobs, no leader election).
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: cosmos-operator-canary
-  namespace: cosmos-canary
-rules:
-- apiGroups: [""]
-  resources: [configmaps, secrets, services, persistentvolumeclaims, pods]
-  verbs: [create, delete, get, list, patch, update, watch]
-- apiGroups: [""]
-  resources: [pods/status, persistentvolumeclaims/status, services/status]
-  verbs: [get, patch, update]
-- apiGroups: [""]
-  resources: [events]
-  verbs: [create, patch]
-- apiGroups: ["cosmos.strange.love"]
-  resources: [canarycosmosfullnodes]
-  verbs: [create, delete, get, list, patch, update, watch]
-- apiGroups: ["cosmos.strange.love"]
-  resources: [canarycosmosfullnodes/finalizers]
-  verbs: [update]
-- apiGroups: ["cosmos.strange.love"]
-  resources: [canarycosmosfullnodes/status]
-  verbs: [get, patch, update]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: cosmos-operator-canary
-  namespace: cosmos-canary
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: cosmos-operator-canary
-subjects:
-- kind: ServiceAccount
-  name: cosmos-operator-canary
-  namespace: cosmos-canary
+# namespaces. Mirrors the generated ClusterRole for the fullnode path
+# (cosmosfullnodes -> canarycosmosfullnodes); volumesnapshots and the alpha
+# kinds are excluded because those controllers are not registered in canary
+# mode.
