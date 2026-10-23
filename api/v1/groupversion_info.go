@@ -20,6 +20,8 @@ limitations under the License.
 package v1
 
 import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
 )
@@ -34,3 +36,23 @@ var (
 	// AddToScheme adds the types in this group-version to the given scheme.
 	AddToScheme = SchemeBuilder.AddToScheme
 )
+
+// CanaryCosmosFullNodeKind is the alternate kind under which the same Go types
+// can be registered. The canary operator build runs the identical reconcile
+// code against this kind so it can coexist with an operator managing
+// CosmosFullNode objects - the two kinds never share objects or status writes.
+const CanaryCosmosFullNodeKind = "CanaryCosmosFullNode"
+
+// CanaryAddToScheme registers the CosmosFullNode Go types under the
+// CanaryCosmosFullNode kind INSTEAD of CosmosFullNode. Controllers built with
+// For(&CosmosFullNode{}) then watch, fetch, own and write
+// canarycosmosfullnodes resources exclusively: watches, owner references,
+// status subresource writes and client gets all resolve the GVK through the
+// scheme. Registering the original kind too is not possible - a Go type maps
+// to exactly one GVK per scheme.
+func CanaryAddToScheme(s *runtime.Scheme) error {
+	s.AddKnownTypeWithName(GroupVersion.WithKind(CanaryCosmosFullNodeKind), &CosmosFullNode{})
+	s.AddKnownTypeWithName(GroupVersion.WithKind(CanaryCosmosFullNodeKind+"List"), &CosmosFullNodeList{})
+	metav1.AddToGroupVersion(s, GroupVersion)
+	return nil
+}
