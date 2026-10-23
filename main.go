@@ -17,21 +17,25 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
 	"time"
 
+	opcmd "github.com/bryanlabs/cosmos-operator/cmd"
+	"github.com/bryanlabs/cosmos-operator/controllers"
+	"github.com/bryanlabs/cosmos-operator/internal/cosmos"
+	"github.com/bryanlabs/cosmos-operator/internal/fullnode"
+	"github.com/bryanlabs/cosmos-operator/internal/version"
 	"github.com/go-logr/zapr"
 	"github.com/pkg/profile"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	opcmd "github.com/strangelove-ventures/cosmos-operator/cmd"
-	"github.com/strangelove-ventures/cosmos-operator/controllers"
-	"github.com/strangelove-ventures/cosmos-operator/internal/cosmos"
-	"github.com/strangelove-ventures/cosmos-operator/internal/fullnode"
-	"github.com/strangelove-ventures/cosmos-operator/internal/version"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -40,9 +44,10 @@ import (
 	// Add Pprof endpoints.
 	_ "net/http/pprof"
 
+	cosmosv1 "github.com/bryanlabs/cosmos-operator/api/v1"
+	cosmosv1alpha1 "github.com/bryanlabs/cosmos-operator/api/v1alpha1"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
-	cosmosv1 "github.com/strangelove-ventures/cosmos-operator/api/v1"
-	cosmosv1alpha1 "github.com/strangelove-ventures/cosmos-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -77,6 +82,8 @@ func main() {
 // root command flags
 var (
 	metricsAddr          string
+	metricsSecure        bool
+	reconcilePeriod      time.Duration
 	enableLeaderElection bool
 	probeAddr            string
 	profileMode          string
@@ -95,12 +102,18 @@ func rootCmd() *cobra.Command {
 
 	root.Flags().StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	root.Flags().StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	root.Flags().BoolVar(&metricsSecure, "metrics-secure", false,
+		"Serve metrics over HTTPS and require authentication and authorization. "+
+			"Replaces the kube-rbac-proxy sidecar; the manager needs create on tokenreviews and subjectaccessreviews.")
 	root.Flags().BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	root.Flags().StringVar(&profileMode, "profile", "", "Enable profiling and save profile to working dir. (Must be one of 'cpu', or 'mem'.)")
 	root.Flags().StringVar(&logLevel, "log-level", "info", "Logging level one of 'error', 'info', 'debug'")
 	root.Flags().StringVar(&logFormat, "log-format", "console", "Logging format one of 'console' or 'json'")
+	root.Flags().DurationVar(&reconcilePeriod, "reconcile-period", 60*time.Second,
+		"How often a healthy fullnode is polled for consensus state. Raise it to cut steady-state "+
+			"API server writes; lower it for faster height reporting.")
 
 	if err := viper.BindPFlags(root.Flags()); err != nil {
 		panic(err)
@@ -137,9 +150,10 @@ func startManager(cmd *cobra.Command, args []string) error {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		Port:                   9443,
+		Scheme: scheme,
+		// controller-runtime 0.15 moved metrics behind a dedicated options struct. The webhook Port
+		// that used to sit here is gone because this operator serves no webhooks.
+		Metrics:                metricsOptions(),
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "16e1bc09.strange.love",
@@ -161,9 +175,16 @@ func startManager(cmd *cobra.Command, args []string) error {
 
 	ctx := cmd.Context()
 
+	// Version-check containers are pulled from the same repository as the operator itself, so
+	// discover where this image came from. Without this, a fork publishing under its own
+	// repository serves managed pods an image tag that does not exist.
+	fullnode.SetOperatorImage(discoverOperatorImage(ctx, mgr.GetAPIReader()))
+
 	// CacheController which fetches CometBFT status in the background.
 	httpClient := &http.Client{Timeout: 30 * time.Second}
-	statusClient := fullnode.NewStatusClient(mgr.GetClient())
+	// Read status through the uncached API reader so the read-modify-write in SyncUpdate does not
+	// build on a stale resourceVersion from the informer cache.
+	statusClient := fullnode.NewStatusClientWithReader(mgr.GetClient(), mgr.GetAPIReader())
 	cometClient := cosmos.NewCometClient(httpClient)
 	cacheController := cosmos.NewCacheController(
 		cosmos.NewStatusCollector(cometClient, 5*time.Second),
@@ -181,6 +202,7 @@ func startManager(cmd *cobra.Command, args []string) error {
 		mgr.GetEventRecorderFor(cosmosv1.CosmosFullNodeController),
 		statusClient,
 		cacheController,
+		controllers.WithReconcilePeriod(reconcilePeriod),
 	).SetupWithManager(ctx, mgr); err != nil {
 		return fmt.Errorf("unable to create CosmosFullNode controller: %w", err)
 	}
@@ -251,4 +273,50 @@ func profileOpts(mode string) []func(*profile.Profile) {
 	default:
 		panic(fmt.Errorf("unknown profile mode %q", mode))
 	}
+}
+
+// discoverOperatorImage reads the operator's own container image reference, so version-check
+// containers are pulled from wherever this binary was published, pinned the same way.
+//
+// Returns "" when discovery is not possible, in which case OPERATOR_IMAGE_REPO or the compiled
+// default applies. Discovery is best-effort by design: it must never stop the operator starting.
+func discoverOperatorImage(ctx context.Context, reader client.Reader) string {
+	podName, namespace := os.Getenv("POD_NAME"), os.Getenv("POD_NAMESPACE")
+	if podName == "" || namespace == "" {
+		return ""
+	}
+
+	var pod corev1.Pod
+	if err := reader.Get(ctx, client.ObjectKey{Name: podName, Namespace: namespace}, &pod); err != nil {
+		ctrl.Log.V(1).Info("Could not read own pod to discover image repository", "error", err.Error())
+		return ""
+	}
+
+	// The shipped manifest names this container "manager". Overridable for anyone who renames it.
+	want := os.Getenv("OPERATOR_CONTAINER_NAME")
+	if want == "" {
+		want = "manager"
+	}
+	for _, c := range pod.Spec.Containers {
+		if c.Name == want {
+			return c.Image
+		}
+	}
+	// A single-container pod is unambiguous even if the name does not match.
+	if len(pod.Spec.Containers) == 1 {
+		return pod.Spec.Containers[0].Image
+	}
+	return ""
+}
+
+// metricsOptions configures the metrics endpoint. With --metrics-secure the manager serves metrics
+// over HTTPS and authorizes callers itself using controller-runtime's built-in filters, which is
+// what the unmaintained kube-rbac-proxy sidecar used to do.
+func metricsOptions() metricsserver.Options {
+	opts := metricsserver.Options{BindAddress: metricsAddr}
+	if metricsSecure {
+		opts.SecureServing = true
+		opts.FilterProvider = filters.WithAuthenticationAndAuthorization
+	}
+	return opts
 }

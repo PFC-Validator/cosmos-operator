@@ -2,7 +2,7 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.24.1
+ENVTEST_K8S_VERSION = 1.31.0
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -88,7 +88,7 @@ build: generate ## Build manager binary.
 run: manifests generate ## Run a controller from your host.
 	go run . --log-level=debug
 
-PRE_IMG ?= ghcr.io/strangelove-ventures/cosmos-operator:dev$(shell git describe --always --dirty)
+PRE_IMG ?= ghcr.io/bryanlabs/cosmos-operator:dev$(shell git describe --always --dirty)
 .PHONY: docker-prerelease
 docker-prerelease: ## Build and push a prerelease docker image.
 	IMG=$(PRE_IMG) $(MAKE) docker-build docker-push
@@ -121,7 +121,7 @@ deploy-prerelease: install docker-prerelease ## Install CRDs, build docker image
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(PRE_IMG)
 	$(KUSTOMIZE) build config/default | kubectl apply -f -
 	@#Hack to reset tag to avoid git thrashing.
-	@cd config/manager && $(KUSTOMIZE) edit set image controller=ghcr.io/strangelove-ventures/cosmos-operator:latest
+	@cd config/manager && $(KUSTOMIZE) edit set image controller=ghcr.io/bryanlabs/cosmos-operator:latest
 
 .PHONY: deploy
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
@@ -163,3 +163,8 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
 $(ENVTEST): $(LOCALBIN)
 	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+
+.PHONY: test-envtest
+test-envtest: manifests generate envtest ## Run tests including the envtest control-plane suite.
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
+		go test -timeout=300s ./controllers/...

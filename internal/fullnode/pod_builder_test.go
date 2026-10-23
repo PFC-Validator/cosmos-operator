@@ -2,12 +2,13 @@ package fullnode
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	cosmosv1 "github.com/bryanlabs/cosmos-operator/api/v1"
+	"github.com/bryanlabs/cosmos-operator/internal/kube"
+	"github.com/bryanlabs/cosmos-operator/internal/test"
 	"github.com/samber/lo"
-	cosmosv1 "github.com/strangelove-ventures/cosmos-operator/api/v1"
-	"github.com/strangelove-ventures/cosmos-operator/internal/kube"
-	"github.com/strangelove-ventures/cosmos-operator/internal/test"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -301,7 +302,7 @@ func TestPodBuilder(t *testing.T) {
 
 		healthContainer := pod.Spec.Containers[1]
 		require.Equal(t, "healthcheck", healthContainer.Name)
-		require.Equal(t, "ghcr.io/strangelove-ventures/cosmos-operator:latest", healthContainer.Image)
+		require.Equal(t, "ghcr.io/pfc-validator/cosmos-operator:latest", healthContainer.Image)
 		require.Equal(t, []string{"/manager", "healthcheck", "--rpc-host", "http://localhost:26657"}, healthContainer.Command)
 		require.Empty(t, healthContainer.Args)
 		require.Empty(t, healthContainer.ImagePullPolicy)
@@ -316,13 +317,13 @@ func TestPodBuilder(t *testing.T) {
 		require.Len(t, lo.Map(pod.Spec.InitContainers, func(c corev1.Container, _ int) string { return c.Name }), 7)
 
 		wantInitImages := []string{
-			"ghcr.io/strangelove-ventures/infra-toolkit:v0.1.6",
+			infraToolImage,
 			"main-image:v1.2.3",
-			"ghcr.io/strangelove-ventures/infra-toolkit:v0.1.6",
-			"ghcr.io/strangelove-ventures/infra-toolkit:v0.1.6",
-			"ghcr.io/strangelove-ventures/infra-toolkit:v0.1.6",
-			"ghcr.io/strangelove-ventures/infra-toolkit:v0.1.6",
-			"ghcr.io/strangelove-ventures/cosmos-operator:latest",
+			infraToolImage,
+			infraToolImage,
+			infraToolImage,
+			infraToolImage,
+			"ghcr.io/pfc-validator/cosmos-operator:latest",
 		}
 		require.Equal(t, wantInitImages, lo.Map(pod.Spec.InitContainers, func(c corev1.Container, _ int) string {
 			return c.Image
@@ -391,7 +392,7 @@ func TestPodBuilder(t *testing.T) {
 		require.NoError(t, err)
 
 		vols := pod.Spec.Volumes
-		require.Equal(t, 4, len(vols))
+		require.Equal(t, 5, len(vols))
 
 		require.Equal(t, "vol-chain-home", vols[0].Name)
 		require.Equal(t, "pvc-osmosis-5", vols[0].PersistentVolumeClaim.ClaimName)
@@ -404,13 +405,22 @@ func TestPodBuilder(t *testing.T) {
 		wantItems := []corev1.KeyToPath{
 			{Key: "config-overlay.toml", Path: "config-overlay.toml"},
 			{Key: "app-overlay.toml", Path: "app-overlay.toml"},
-			{Key: "node_key.json", Path: "node_key.json"},
 		}
-		require.Equal(t, wantItems, vols[2].ConfigMap.Items)
+		require.Equal(t, wantItems, vols[2].ConfigMap.Items,
+			"node key must not be projected from the ConfigMap")
+
+		// The node key is the pod's p2p identity, so it comes from a Secret.
+		require.Equal(t, "vol-node-key", vols[3].Name)
+		require.NotNil(t, vols[3].Secret)
+		require.Equal(t, "osmosis-5-node-key", vols[3].Secret.SecretName)
+		require.Equal(t, []corev1.KeyToPath{{Key: "node_key.json", Path: "node_key.json"}}, vols[3].Secret.Items)
+		// Secret volume files are owned root:fsGroup, so group read is required for the
+		// container user to read its own key.
+		require.Equal(t, int32(0440), *vols[3].Secret.DefaultMode)
 
 		// Required for statesync
-		require.Equal(t, "vol-system-tmp", vols[3].Name)
-		require.NotNil(t, vols[3].EmptyDir)
+		require.Equal(t, "vol-system-tmp", vols[4].Name)
+		require.NotNil(t, vols[4].EmptyDir)
 
 		require.Equal(t, len(pod.Spec.Containers), 2)
 
@@ -438,7 +448,8 @@ func TestPodBuilder(t *testing.T) {
 		require.True(t, mount.ReadOnly)
 
 		for _, c := range pod.Spec.InitContainers {
-			require.Len(t, c.VolumeMounts, 4)
+			// chain-home, system-tmp, tmp, config, node-key
+			require.Len(t, c.VolumeMounts, 5)
 			mount := c.VolumeMounts[0]
 			require.Equal(t, "vol-chain-home", mount.Name, c.Name)
 			require.Equal(t, "/home/operator/cosmos", mount.MountPath, c.Name)
@@ -632,8 +643,8 @@ gaiad start --home /home/operator/cosmos`
 		require.NoError(t, err)
 
 		vols := lo.SliceToMap(pod.Spec.Volumes, func(v corev1.Volume) (string, corev1.Volume) { return v.Name, v })
-		require.ElementsMatch(t, []string{"foo-vol", "vol-tmp", "vol-system-tmp", "vol-config", "vol-chain-home"}, lo.Keys(vols))
-		require.Equal(t, &corev1.EmptyDirVolumeSource{}, vols["foo-vol"].VolumeSource.EmptyDir)
+		require.ElementsMatch(t, []string{"foo-vol", "vol-tmp", "vol-system-tmp", "vol-config", "vol-node-key", "vol-chain-home"}, lo.Keys(vols))
+		require.Equal(t, &corev1.EmptyDirVolumeSource{}, vols["foo-vol"].EmptyDir)
 
 		containers := lo.SliceToMap(pod.Spec.Containers, func(c corev1.Container) (string, corev1.Container) { return c.Name, c })
 		require.ElementsMatch(t, []string{"node", "new-sidecar", "healthcheck"}, lo.Keys(containers))
@@ -781,4 +792,97 @@ func TestPVCName(t *testing.T) {
 	pod.Spec.Volumes = append([]corev1.Volume{{Name: "foo"}}, pod.Spec.Volumes...)
 
 	require.Equal(t, "pvc-osmosis-5", PVCName(pod))
+}
+
+func TestResolveOperatorImage(t *testing.T) {
+	// Discovery state is package level, so reset it around each case and restore it afterwards.
+	saved, savedRef := discoveredOperatorImageRepo.Load(), discoveredOperatorImageRef.Load()
+	t.Cleanup(func() {
+		discoveredOperatorImageRepo, discoveredOperatorImageRef = atomic.Value{}, atomic.Value{}
+		if saved != nil {
+			discoveredOperatorImageRepo.Store(saved)
+		}
+		if savedRef != nil {
+			discoveredOperatorImageRef.Store(savedRef)
+		}
+	})
+	reset := func() { discoveredOperatorImageRepo, discoveredOperatorImageRef = atomic.Value{}, atomic.Value{} }
+	const pinned = "ghcr.io/someone/their-fork:v1.2.3@sha256:adbbb3bc3f407e819371bbf5c6d3aed98eca7334768393e0821c1b7ac9ce04dd"
+
+	t.Run("defaults to the historical repo", func(t *testing.T) {
+		reset()
+		t.Setenv("OPERATOR_IMAGE_REPO", "")
+		require.True(t, strings.HasPrefix(resolveOperatorImage(), "ghcr.io/pfc-validator/cosmos-operator:"))
+	})
+
+	t.Run("honors the override so CI and the operator can disagree on repo name", func(t *testing.T) {
+		reset()
+		t.Setenv("OPERATOR_IMAGE_REPO", "ghcr.io/pfc-validator/cosmos-operator-contrib")
+		require.True(t, strings.HasPrefix(resolveOperatorImage(), "ghcr.io/pfc-validator/cosmos-operator-contrib:"))
+	})
+
+	t.Run("prefers a discovered repo over the compiled default", func(t *testing.T) {
+		reset()
+		t.Setenv("OPERATOR_IMAGE_REPO", "")
+		SetOperatorImageRepo("ghcr.io/someone/their-fork")
+		require.True(t, strings.HasPrefix(resolveOperatorImage(), "ghcr.io/someone/their-fork:"))
+	})
+
+	t.Run("env var wins over discovery", func(t *testing.T) {
+		reset()
+		SetOperatorImageRepo("ghcr.io/someone/their-fork")
+		t.Setenv("OPERATOR_IMAGE_REPO", "ghcr.io/explicit/pin")
+		require.True(t, strings.HasPrefix(resolveOperatorImage(), "ghcr.io/explicit/pin:"))
+	})
+
+	t.Run("a failed discovery does not erase a good value", func(t *testing.T) {
+		reset()
+		t.Setenv("OPERATOR_IMAGE_REPO", "")
+		SetOperatorImageRepo("ghcr.io/someone/their-fork")
+		SetOperatorImageRepo("")
+		require.True(t, strings.HasPrefix(resolveOperatorImage(), "ghcr.io/someone/their-fork:"))
+	})
+
+	t.Run("reuses a digest-pinned operator image as is", func(t *testing.T) {
+		reset()
+		t.Setenv("OPERATOR_IMAGE_REPO", "")
+		SetOperatorImage(pinned)
+		require.Equal(t, pinned, resolveOperatorImage())
+	})
+
+	t.Run("a tag-only operator image still contributes its repo", func(t *testing.T) {
+		reset()
+		t.Setenv("OPERATOR_IMAGE_REPO", "")
+		SetOperatorImage("ghcr.io/someone/their-fork:v1.2.3")
+		require.True(t, strings.HasPrefix(resolveOperatorImage(), "ghcr.io/someone/their-fork:"))
+		require.NotContains(t, resolveOperatorImage(), "@")
+	})
+
+	t.Run("env var wins over a pinned image", func(t *testing.T) {
+		reset()
+		SetOperatorImage(pinned)
+		t.Setenv("OPERATOR_IMAGE_REPO", "ghcr.io/explicit/pin")
+		require.True(t, strings.HasPrefix(resolveOperatorImage(), "ghcr.io/explicit/pin:"))
+	})
+}
+
+func TestRepoFromImageRef(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		image string
+		want  string
+	}{
+		{"tagged", "ghcr.io/pfc-validator/cosmos-operator:v0.25.3", "ghcr.io/pfc-validator/cosmos-operator"},
+		{"no tag", "ghcr.io/pfc-validator/cosmos-operator", "ghcr.io/pfc-validator/cosmos-operator"},
+		{"digest", "ghcr.io/pfc-validator/cosmos-operator@sha256:abc123", "ghcr.io/pfc-validator/cosmos-operator"},
+		{"registry port with tag", "localhost:5000/cosmos-operator:v1", "localhost:5000/cosmos-operator"},
+		// The final colon belongs to the registry port, not a tag, so nothing may be stripped.
+		{"registry port without tag", "localhost:5000/cosmos-operator", "localhost:5000/cosmos-operator"},
+		{"docker hub short form", "pfc-validator/cosmos-operator:latest", "pfc-validator/cosmos-operator"},
+		{"empty", "", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, RepoFromImageRef(tt.image))
+		})
+	}
 }

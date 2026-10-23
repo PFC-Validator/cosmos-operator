@@ -1,7 +1,4 @@
-# See rocksdb/README.md for instructions to update rocksdb version
-FROM ghcr.io/strangelove-ventures/rocksdb:v7.10.2 AS rocksdb
-
-FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 RUN apk add --update --no-cache\
     gcc\
@@ -41,9 +38,6 @@ RUN set -eux;\
     zstd-static\
     --allow-untrusted
 
-# Install RocksDB headers and static library
-COPY --from=rocksdb /rocksdb /rocksdb
-
 WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY go.mod go.mod
@@ -70,15 +64,13 @@ RUN set -eux;\
     export  GOOS=linux \
             GOARCH=$TARGETARCH \
             CGO_ENABLED=1 \
-            LDFLAGS='-linkmode external -extldflags "-static"' \
-            CGO_CFLAGS="-I/rocksdb/include" \
-            CGO_LDFLAGS="-L/rocksdb -L/usr/lib -L/lib -lrocksdb -lstdc++ -lm -lz -lbz2 -lsnappy -llz4 -lzstd";\
-    go build -tags 'rocksdb pebbledb' -ldflags "-X github.com/strangelove-ventures/cosmos-operator/internal/version.version=$VERSION $LDFLAGS" -a -o manager .
+            LDFLAGS='-linkmode external -extldflags "-static"';\
+    go build -tags 'pebbledb' -ldflags "-X github.com/bryanlabs/cosmos-operator/internal/version.version=$VERSION $LDFLAGS" -a -o manager .
 
 # Build final image from scratch
 FROM scratch
 
-LABEL org.opencontainers.image.source=https://github.com/strangelove-ventures/cosmos-operator
+LABEL org.opencontainers.image.source=https://github.com/PFC-Validator/cosmos-operator
 
 WORKDIR /
 COPY --from=builder /workspace/manager .

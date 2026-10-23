@@ -9,8 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	cosmosv1 "github.com/strangelove-ventures/cosmos-operator/api/v1"
-	"github.com/strangelove-ventures/cosmos-operator/internal/kube"
+	cosmosv1 "github.com/bryanlabs/cosmos-operator/api/v1"
+	"github.com/bryanlabs/cosmos-operator/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -65,6 +65,15 @@ func NewNodeKeyCollector(client Client) *NodeKeyCollector {
 }
 
 // Collect node key information given the crd.
+//
+// Node keys are resolved in this order, and the order matters because generating a new key changes
+// the node's p2p identity and breaks any peer that has the old <node-id>@<address> recorded:
+//
+//  1. The operator-managed Secret, which is where node keys live.
+//  2. The instance ConfigMap, which is where they used to live. Adopting the existing value here is
+//     what makes upgrading non-destructive; the key is then written to the Secret and dropped from
+//     the ConfigMap.
+//  3. A freshly generated key, only when the instance has no key anywhere.
 func (c NodeKeyCollector) Collect(ctx context.Context, crd *cosmosv1.CosmosFullNode) (NodeKeys, kube.ReconcileError) {
 	logger := log.FromContext(ctx)
 	nodeKeys := make(NodeKeys)
@@ -77,27 +86,55 @@ func (c NodeKeyCollector) Collect(ctx context.Context, crd *cosmosv1.CosmosFullN
 		return nil, kube.TransientError(fmt.Errorf("list existing configmaps: %w", err))
 	}
 
+	var secretList corev1.SecretList
+	if err := c.client.List(ctx, &secretList,
+		client.InNamespace(crd.Namespace),
+		client.MatchingFields{kube.ControllerOwnerField: crd.Name},
+	); err != nil {
+		return nil, kube.TransientError(fmt.Errorf("list existing node key secrets: %w", err))
+	}
+
 	currentCms := ptrSlice(cms.Items)
+	currentSecrets := ptrSlice(secretList.Items)
 
 	for i := crd.Spec.Ordinals.Start; i < crd.Spec.Ordinals.Start+crd.Spec.Replicas; i++ {
+		var secret corev1.Secret
+		secret.Name = NodeKeySecretName(crd, i)
+		secret.Namespace = crd.Namespace
+		secret = *kube.FindOrDefaultCopy(currentSecrets, &secret)
+
 		var confMap corev1.ConfigMap
 		confMap.Name = instanceName(crd, i)
 		confMap.Namespace = crd.Namespace
 		confMap = *kube.FindOrDefaultCopy(currentCms, &confMap)
 
-		nodeKeyContent := confMap.Data[nodeKeyFile]
+		var nodeKeyContent []byte
+		var source string
+		switch {
+		case len(secret.Data[nodeKeyFile]) > 0:
+			nodeKeyContent = secret.Data[nodeKeyFile]
+			source = "secret"
+		case confMap.Data[nodeKeyFile] != "":
+			nodeKeyContent = []byte(confMap.Data[nodeKeyFile])
+			source = "configmap"
+		}
 
 		var nodeKey NodeKey
 		var marshaledNodeKey []byte
 
-		if nodeKeyContent != "" {
-			err := json.Unmarshal([]byte(nodeKeyContent), &nodeKey)
-			if err != nil {
+		if len(nodeKeyContent) > 0 {
+			if err := json.Unmarshal(nodeKeyContent, &nodeKey); err != nil {
 				return nil, kube.UnrecoverableError(fmt.Errorf("unmarshal node key: %w", err))
 			}
 
-			// Store the exact value of the node key in the configmap to avoid non-deterministic JSON marshaling which can cause unnecessary updates.
-			marshaledNodeKey = []byte(nodeKeyContent)
+			// Preserve the exact bytes. Re-marshaling is not deterministic and would show up as a
+			// spurious update on every reconcile.
+			marshaledNodeKey = nodeKeyContent
+
+			if source == "configmap" {
+				logger.Info("Adopting node key from configmap into secret, p2p identity is preserved",
+					"ordinal", i, "secretName", NodeKeySecretName(crd, i))
+			}
 		} else {
 			rNodeKey, err := randNodeKey()
 			if err != nil {

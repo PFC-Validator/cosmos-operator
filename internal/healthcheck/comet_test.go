@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bryanlabs/cosmos-operator/internal/cosmos"
 	"github.com/go-logr/logr"
-	"github.com/strangelove-ventures/cosmos-operator/internal/cosmos"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,7 +26,7 @@ func TestComet_ServeHTTP(t *testing.T) {
 	t.Parallel()
 
 	var (
-		stubReq = httptest.NewRequest("GET", "/", nil)
+		stubReq = httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
 	)
 	const testRPC = "http://my-rpc:25567"
 

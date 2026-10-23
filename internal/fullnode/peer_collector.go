@@ -7,12 +7,17 @@ import (
 	"sort"
 	"strconv"
 
+	cosmosv1 "github.com/bryanlabs/cosmos-operator/api/v1"
+	"github.com/bryanlabs/cosmos-operator/internal/kube"
 	"github.com/samber/lo"
-	cosmosv1 "github.com/strangelove-ventures/cosmos-operator/api/v1"
-	"github.com/strangelove-ventures/cosmos-operator/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// externalAddressHostAnnotation, when set on a CosmosFullNode, makes the operator advertise
+// <host>:<nodePort> as p2p.external_address instead of deriving it from a LoadBalancer ingress IP.
+// This allows advertising a real routable hostname behind NAT without running a LoadBalancer controller.
+const externalAddressHostAnnotation = "cosmos.bryanlabs.net/external-address-host"
 
 // Peer contains information about a peer.
 type Peer struct {
@@ -146,6 +151,27 @@ func (c PeerCollector) addExternalAddress(ctx context.Context, peers Peers, crd 
 	if err := c.client.Get(ctx, client.ObjectKey{Name: svcName, Namespace: crd.Namespace}, &svc); err != nil {
 		return kube.TransientError(fmt.Errorf("get server %s: %w", svcName, err))
 	}
+
+	// An explicit external host lets operators advertise a real, routable address without depending on a
+	// LoadBalancer implementation. The port is taken from the service's NodePort when present, so each
+	// ordinal advertises the port that is actually reachable from outside the cluster.
+	if host := crd.Annotations[externalAddressHostAnnotation]; host != "" {
+		objKey := c.objectKey(crd, ordinal)
+		info := peers[objKey]
+		info.hasExternalAddress = true
+		defer func() { peers[objKey] = info }()
+
+		port := crd.Spec.ChainSpec.Comet.P2PPort()
+		for _, p := range svc.Spec.Ports {
+			if p.NodePort != 0 {
+				port = p.NodePort
+				break
+			}
+		}
+		info.ExternalAddress = net.JoinHostPort(host, strconv.FormatInt(int64(port), 10))
+		return nil
+	}
+
 	if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
 		return nil
 	}

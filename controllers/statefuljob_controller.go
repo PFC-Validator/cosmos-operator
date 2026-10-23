@@ -22,11 +22,11 @@ import (
 	"fmt"
 	"time"
 
+	cosmosalpha "github.com/bryanlabs/cosmos-operator/api/v1alpha1"
+	"github.com/bryanlabs/cosmos-operator/internal/kube"
+	"github.com/bryanlabs/cosmos-operator/internal/statefuljob"
 	"github.com/go-logr/logr"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
-	cosmosalpha "github.com/strangelove-ventures/cosmos-operator/api/v1alpha1"
-	"github.com/strangelove-ventures/cosmos-operator/internal/kube"
-	"github.com/strangelove-ventures/cosmos-operator/internal/statefuljob"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
@@ -35,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
 var errMissingVolSnapCRD = errors.New("cluster does not have VolumeSnapshot CRDs installed")
@@ -204,7 +203,7 @@ func (r *StatefulJobReconciler) SetupWithManager(ctx context.Context, mgr ctrl.M
 
 	// Watch for delete events for jobs.
 	cbuilder.Watches(
-		&source.Kind{Type: &batchv1.Job{}},
+		&batchv1.Job{},
 		&handler.EnqueueRequestForObject{},
 		builder.WithPredicates(
 			statefuljob.LabelSelectorPredicate(),

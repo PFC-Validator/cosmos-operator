@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"testing"
 
-	cosmosv1 "github.com/strangelove-ventures/cosmos-operator/api/v1"
-	"github.com/strangelove-ventures/cosmos-operator/internal/diff"
-	"github.com/strangelove-ventures/cosmos-operator/internal/kube"
+	cosmosv1 "github.com/bryanlabs/cosmos-operator/api/v1"
+	"github.com/bryanlabs/cosmos-operator/internal/diff"
+	"github.com/bryanlabs/cosmos-operator/internal/kube"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -808,7 +808,7 @@ func TestPodControl_Reconcile(t *testing.T) {
 		}
 
 		// Make a change that affects only additional pods
-		crd.Spec.AdditionalVersionedPods[0].PodSpec.ServiceAccountName = "metrics-sa"
+		crd.Spec.AdditionalVersionedPods[0].ServiceAccountName = "metrics-sa"
 
 		// This reconcile should delete ALL additional pods due to their own diff
 		requeue, err = control.Reconcile(ctx, nopReporter, &crd, nil, syncInfo)

@@ -3,8 +3,8 @@ package statefuljob
 import (
 	"testing"
 
+	cosmosalpha "github.com/bryanlabs/cosmos-operator/api/v1alpha1"
 	"github.com/samber/lo"
-	cosmosalpha "github.com/strangelove-ventures/cosmos-operator/api/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -90,6 +90,6 @@ func TestBuildJobs(t *testing.T) {
 		gotVol, ok := lo.Last(got.Spec.Template.Spec.Volumes)
 		require.True(t, ok, "Expected to find at least one volume")
 		require.Equal(t, "snapshot", gotVol.Name)
-		require.Equal(t, "cosmoshub", gotVol.VolumeSource.PersistentVolumeClaim.ClaimName)
+		require.Equal(t, "cosmoshub", gotVol.PersistentVolumeClaim.ClaimName)
 	})
 }

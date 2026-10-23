@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	cosmosv1 "github.com/strangelove-ventures/cosmos-operator/api/v1"
+	cosmosv1 "github.com/bryanlabs/cosmos-operator/api/v1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -279,5 +279,97 @@ func TestPeerCollector_Collect(t *testing.T) {
 		require.Error(t, err)
 		require.EqualError(t, err, "get server dydx-p2p-0: boom")
 		require.True(t, err.IsTransient())
+	})
+}
+
+func TestPeerCollector_ExternalAddressHostAnnotation(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	const namespace = "strangelove"
+
+	t.Run("advertises annotation host with the service NodePort", func(t *testing.T) {
+		var crd cosmosv1.CosmosFullNode
+		crd.Name = "dydx"
+		crd.Namespace = namespace
+		crd.Spec.Replicas = 1
+		crd.Annotations = map[string]string{externalAddressHostAnnotation: "p2p.example.com"}
+
+		nodeKeys, err := getMockNodeKeysForCRD(crd, "")
+		require.NoError(t, err)
+
+		getter := mockGetter(func(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			switch ref := obj.(type) {
+			case *corev1.Service:
+				// NodePort deliberately, not LoadBalancer: the annotation must work without one.
+				*ref = corev1.Service{}
+				ref.Spec.Type = corev1.ServiceTypeNodePort
+				ref.Spec.Ports = []corev1.ServicePort{{Name: "p2p", Port: 26656, NodePort: 31402}}
+			}
+			return nil
+		})
+
+		collector := NewPeerCollector(getter)
+		peers, err := collector.Collect(ctx, &crd, nodeKeys)
+		require.NoError(t, err)
+
+		got := peers[client.ObjectKey{Name: "dydx-0", Namespace: namespace}]
+		// Must advertise the externally reachable NodePort, not the internal 26656.
+		require.Equal(t, "p2p.example.com:31402", got.ExternalAddress)
+		require.False(t, peers.HasIncompleteExternalAddress())
+	})
+
+	t.Run("falls back to p2p port when the service has no NodePort", func(t *testing.T) {
+		var crd cosmosv1.CosmosFullNode
+		crd.Name = "dydx"
+		crd.Namespace = namespace
+		crd.Spec.Replicas = 1
+		crd.Annotations = map[string]string{externalAddressHostAnnotation: "p2p.example.com"}
+
+		nodeKeys, err := getMockNodeKeysForCRD(crd, "")
+		require.NoError(t, err)
+
+		getter := mockGetter(func(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			switch ref := obj.(type) {
+			case *corev1.Service:
+				*ref = corev1.Service{}
+				ref.Spec.Type = corev1.ServiceTypeClusterIP
+			}
+			return nil
+		})
+
+		collector := NewPeerCollector(getter)
+		peers, err := collector.Collect(ctx, &crd, nodeKeys)
+		require.NoError(t, err)
+
+		got := peers[client.ObjectKey{Name: "dydx-0", Namespace: namespace}]
+		require.Equal(t, "p2p.example.com:26656", got.ExternalAddress)
+	})
+
+	t.Run("no annotation leaves existing LoadBalancer behavior untouched", func(t *testing.T) {
+		var crd cosmosv1.CosmosFullNode
+		crd.Name = "dydx"
+		crd.Namespace = namespace
+		crd.Spec.Replicas = 1
+
+		nodeKeys, err := getMockNodeKeysForCRD(crd, "")
+		require.NoError(t, err)
+
+		getter := mockGetter(func(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			switch ref := obj.(type) {
+			case *corev1.Service:
+				*ref = corev1.Service{}
+				ref.Spec.Type = corev1.ServiceTypeLoadBalancer
+				ref.Status.LoadBalancer.Ingress = []corev1.LoadBalancerIngress{{IP: "1.2.3.4"}}
+			}
+			return nil
+		})
+
+		collector := NewPeerCollector(getter)
+		peers, err := collector.Collect(ctx, &crd, nodeKeys)
+		require.NoError(t, err)
+
+		got := peers[client.ObjectKey{Name: "dydx-0", Namespace: namespace}]
+		require.Equal(t, "1.2.3.4:26656", got.ExternalAddress)
 	})
 }

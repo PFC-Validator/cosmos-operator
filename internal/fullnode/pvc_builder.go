@@ -3,9 +3,9 @@ package fullnode
 import (
 	"fmt"
 
-	cosmosv1 "github.com/strangelove-ventures/cosmos-operator/api/v1"
-	"github.com/strangelove-ventures/cosmos-operator/internal/diff"
-	"github.com/strangelove-ventures/cosmos-operator/internal/kube"
+	cosmosv1 "github.com/bryanlabs/cosmos-operator/api/v1"
+	"github.com/bryanlabs/cosmos-operator/internal/diff"
+	"github.com/bryanlabs/cosmos-operator/internal/kube"
 	"gopkg.in/inf.v0"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -95,12 +95,12 @@ func pvcResources(
 	dataSource *dataSource,
 	existingSize resource.Quantity,
 	tplResources corev1.ResourceRequirements,
-) corev1.ResourceRequirements {
+) corev1.VolumeResourceRequirements {
 	reqs := tplResources.DeepCopy()
 
 	if dataSource != nil {
 		reqs.Requests[corev1.ResourceStorage] = dataSource.size
-		return *reqs
+		return toVolumeResources(*reqs)
 	}
 
 	if autoScale := crd.Status.SelfHealing.PVCAutoScale; autoScale != nil {
@@ -118,7 +118,19 @@ func pvcResources(
 		reqs.Requests[corev1.ResourceStorage] = existingSize
 	}
 
-	return *reqs
+	return toVolumeResources(*reqs)
+}
+
+// toVolumeResources adapts the CRD's ResourceRequirements to the PVC-specific
+// VolumeResourceRequirements that Kubernetes 1.31 requires on a PersistentVolumeClaimSpec.
+//
+// The CRD deliberately keeps ResourceRequirements so the user-facing API shape does not change.
+// VolumeResourceRequirements simply drops the Claims field, which has no meaning for a volume.
+func toVolumeResources(r corev1.ResourceRequirements) corev1.VolumeResourceRequirements {
+	return corev1.VolumeResourceRequirements{
+		Limits:   r.Limits,
+		Requests: r.Requests,
+	}
 }
 func pvcDisabled(crd *cosmosv1.CosmosFullNode, ordinal int32) bool {
 	name := instanceName(crd, ordinal)
