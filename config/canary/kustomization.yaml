@@ -1,0 +1,6 @@
+# Deploys the canary operator into cosmos-canary alongside the production
+# cosmos-operator. Requires the cosmos-canary namespace (created by the
+# pfc-k8-private canary kustomization) and the CanaryCosmosFullNode CRD.
+resources:
+- rbac.yaml
+- deployment.yaml

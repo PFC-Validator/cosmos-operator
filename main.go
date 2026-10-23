@@ -32,6 +32,7 @@ import (
 	"github.com/pkg/profile"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -64,9 +65,21 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(snapshotv1.AddToScheme(scheme))
 
-	utilruntime.Must(cosmosv1.AddToScheme(scheme))
+	// Canary mode: register the same Go types under the CanaryCosmosFullNode
+	// kind so this operator manages only canary CRs and can run alongside an
+	// operator managing CosmosFullNode objects. See CanaryAddToScheme.
+	if os.Getenv("OPERATOR_KIND") == cosmosv1.CanaryCosmosFullNodeKind {
+		utilruntime.Must(cosmosv1.CanaryAddToScheme(scheme))
+	} else {
+		utilruntime.Must(cosmosv1.AddToScheme(scheme))
+	}
 	utilruntime.Must(cosmosv1alpha1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
+}
+
+// canaryMode reports whether this operator runs against the CanaryCosmosFullNode kind.
+func canaryMode() bool {
+	return os.Getenv("OPERATOR_KIND") == cosmosv1.CanaryCosmosFullNodeKind
 }
 
 func main() {
@@ -149,7 +162,7 @@ func startManager(cmd *cobra.Command, args []string) error {
 		defer profile.Start(profileOpts(profileMode)...).Stop()
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgrOpts := ctrl.Options{
 		Scheme: scheme,
 		// controller-runtime 0.15 moved metrics behind a dedicated options struct. The webhook Port
 		// that used to sit here is gone because this operator serves no webhooks.
@@ -168,7 +181,19 @@ func startManager(cmd *cobra.Command, args []string) error {
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
-	})
+	}
+	// Canary mode walls the manager into a single namespace: the informer
+	// cache never lists outside it, so namespaced RBAC (a Role instead of a
+	// ClusterRole) is sufficient and the blast radius is one namespace.
+	if canaryMode() {
+		ns := os.Getenv("OPERATOR_NAMESPACE")
+		if ns == "" {
+			ns = "cosmos-canary"
+		}
+		mgrOpts.Cache = cache.Options{DefaultNamespaces: map[string]cache.Config{ns: {}}}
+		mgrOpts.LeaderElection = false
+	}
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
 		return fmt.Errorf("unable to start manager: %w", err)
 	}
@@ -218,32 +243,39 @@ func startManager(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unable to create SelfHealing controller: %w", err)
 	}
 
-	// Test for presence of VolumeSnapshot CRD.
-	snapshotErr := controllers.IndexVolumeSnapshots(ctx, mgr)
-	if snapshotErr != nil {
-		setupLog.Info("Warning: VolumeSnapshot CRD not found, StatefulJob and ScheduledVolumeSnapshot controllers will be disabled")
-	}
+	// Canary mode registers only the fullnode reconcile path. StatefulJobs and
+	// ScheduledVolumeSnapshots watch alpha kinds cluster-wide and are not part
+	// of what the canary validates.
+	if canaryMode() {
+		setupLog.Info("canary mode: managing CanaryCosmosFullNode only; StatefulJob and ScheduledVolumeSnapshot controllers disabled")
+	} else {
+		// Test for presence of VolumeSnapshot CRD.
+		snapshotErr := controllers.IndexVolumeSnapshots(ctx, mgr)
+		if snapshotErr != nil {
+			setupLog.Info("Warning: VolumeSnapshot CRD not found, StatefulJob and ScheduledVolumeSnapshot controllers will be disabled")
+		}
 
-	// StatefulJobs
-	jobCtl := controllers.NewStatefulJob(
-		mgr.GetClient(),
-		mgr.GetEventRecorderFor(cosmosv1alpha1.StatefulJobController),
-		snapshotErr != nil,
-	)
+		// StatefulJobs
+		jobCtl := controllers.NewStatefulJob(
+			mgr.GetClient(),
+			mgr.GetEventRecorderFor(cosmosv1alpha1.StatefulJobController),
+			snapshotErr != nil,
+		)
 
-	if err = jobCtl.SetupWithManager(ctx, mgr); err != nil {
-		return fmt.Errorf("unable to create StatefulJob controller: %w", err)
-	}
+		if err = jobCtl.SetupWithManager(ctx, mgr); err != nil {
+			return fmt.Errorf("unable to create StatefulJob controller: %w", err)
+		}
 
-	// ScheduledVolumeSnapshots
-	if err = controllers.NewScheduledVolumeSnapshotReconciler(
-		mgr.GetClient(),
-		mgr.GetEventRecorderFor(cosmosv1alpha1.ScheduledVolumeSnapshotController),
-		statusClient,
-		cacheController,
-		snapshotErr != nil,
-	).SetupWithManager(ctx, mgr); err != nil {
-		return fmt.Errorf("unable to create ScheduledVolumeSnapshot controller: %w", err)
+		// ScheduledVolumeSnapshots
+		if err = controllers.NewScheduledVolumeSnapshotReconciler(
+			mgr.GetClient(),
+			mgr.GetEventRecorderFor(cosmosv1alpha1.ScheduledVolumeSnapshotController),
+			statusClient,
+			cacheController,
+			snapshotErr != nil,
+		).SetupWithManager(ctx, mgr); err != nil {
+			return fmt.Errorf("unable to create ScheduledVolumeSnapshot controller: %w", err)
+		}
 	}
 
 	//+kubebuilder:scaffold:builder

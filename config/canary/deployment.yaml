@@ -1,0 +1,54 @@
+# Canary operator: the same manager binary as production, but started with
+# OPERATOR_KIND=CanaryCosmosFullNode so it registers its types under the
+# canary kind and manages only CanaryCosmosFullNode objects, and with its
+# informer cache (and RBAC) walled into cosmos-canary. Runs alongside the
+# production operator without sharing a single object.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cosmos-operator-canary
+  namespace: cosmos-canary
+  labels:
+    app.kubernetes.io/name: cosmos-operator-canary
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cosmos-operator-canary
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cosmos-operator-canary
+    spec:
+      serviceAccountName: cosmos-operator-canary
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: manager
+        command: [/manager]
+        env:
+        - name: OPERATOR_KIND
+          value: CanaryCosmosFullNode
+        - name: OPERATOR_NAMESPACE
+          value: cosmos-canary
+        # Bump to the release tag that contains OPERATOR_KIND support
+        # (the first tag cut after this directory lands on main).
+        image: ghcr.io/pfc-validator/cosmos-operator:v0.26.1-pfc
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 200Mi
+          limits:
+            memory: 500Mi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cosmos-operator-canary
+  namespace: cosmos-canary
