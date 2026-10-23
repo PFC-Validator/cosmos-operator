@@ -1,6 +1,8 @@
 package fullnode
 
 import (
+	"os"
+
 	cosmosv1 "github.com/bryanlabs/cosmos-operator/api/v1"
 	"github.com/bryanlabs/cosmos-operator/internal/diff"
 	"github.com/bryanlabs/cosmos-operator/internal/kube"
@@ -8,6 +10,17 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// vcCRDResource is the CRD resource the per-chain version-check ServiceAccount
+// may read and patch status on. A canary-mode operator manages
+// canarycosmosfullnodes, so the Role it provisions must grant that resource or
+// the version-check pod's CR get is forbidden.
+var vcCRDResource = func() string {
+	if os.Getenv("OPERATOR_KIND") == cosmosv1.CanaryCosmosFullNodeKind {
+		return "canarycosmosfullnodes"
+	}
+	return "cosmosfullnodes"
+}()
 
 func serviceAccountName(crd *cosmosv1.CosmosFullNode) string {
 	if crd.Spec.ServiceAccountName != "" {
@@ -73,12 +86,12 @@ func BuildRoles(crd *cosmosv1.CosmosFullNode) []diff.Resource[*rbacv1.Role] {
 			},
 			{
 				APIGroups: []string{"cosmos.strange.love"},
-				Resources: []string{"cosmosfullnodes"},
+				Resources: []string{vcCRDResource},
 				Verbs:     []string{"get"},
 			},
 			{
 				APIGroups: []string{"cosmos.strange.love"},
-				Resources: []string{"cosmosfullnodes/status"},
+				Resources: []string{vcCRDResource + "/status"},
 				Verbs:     []string{"patch"},
 			},
 		},
