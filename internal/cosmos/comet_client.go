@@ -100,11 +100,10 @@ func (client *CometClient) Status(ctx context.Context, rpcHost string) (CometSta
 		return status, fmt.Errorf("malformed host: %w", err)
 	}
 	u.Path = "status"
-	req, err := http.NewRequest("GET", u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
 	if err != nil {
 		return status, fmt.Errorf("malformed request: %w", err)
 	}
-	req = req.WithContext(ctx)
 	resp, err := client.httpDo(req)
 	if err != nil {
 		return status, err

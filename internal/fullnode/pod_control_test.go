@@ -808,7 +808,7 @@ func TestPodControl_Reconcile(t *testing.T) {
 		}
 
 		// Make a change that affects only additional pods
-		crd.Spec.AdditionalVersionedPods[0].PodSpec.ServiceAccountName = "metrics-sa"
+		crd.Spec.AdditionalVersionedPods[0].ServiceAccountName = "metrics-sa"
 
 		// This reconcile should delete ALL additional pods due to their own diff
 		requeue, err = control.Reconcile(ctx, nopReporter, &crd, nil, syncInfo)

@@ -26,7 +26,7 @@ func TestComet_ServeHTTP(t *testing.T) {
 	t.Parallel()
 
 	var (
-		stubReq = httptest.NewRequest("GET", "/", nil)
+		stubReq = httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
 	)
 	const testRPC = "http://my-rpc:25567"
 

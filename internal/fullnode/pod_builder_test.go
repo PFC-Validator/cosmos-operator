@@ -644,7 +644,7 @@ gaiad start --home /home/operator/cosmos`
 
 		vols := lo.SliceToMap(pod.Spec.Volumes, func(v corev1.Volume) (string, corev1.Volume) { return v.Name, v })
 		require.ElementsMatch(t, []string{"foo-vol", "vol-tmp", "vol-system-tmp", "vol-config", "vol-node-key", "vol-chain-home"}, lo.Keys(vols))
-		require.Equal(t, &corev1.EmptyDirVolumeSource{}, vols["foo-vol"].VolumeSource.EmptyDir)
+		require.Equal(t, &corev1.EmptyDirVolumeSource{}, vols["foo-vol"].EmptyDir)
 
 		containers := lo.SliceToMap(pod.Spec.Containers, func(c corev1.Container) (string, corev1.Container) { return c.Name, c })
 		require.ElementsMatch(t, []string{"node", "new-sidecar", "healthcheck"}, lo.Keys(containers))

@@ -1,6 +1,7 @@
 package healthcheck
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
@@ -12,7 +13,7 @@ func TestDiskUsage(t *testing.T) {
 	t.Run("happy path", func(t *testing.T) {
 		var (
 			w = httptest.NewRecorder()
-			r = httptest.NewRequest("GET", "/ignored", nil)
+			r = httptest.NewRequestWithContext(context.Background(), "GET", "/ignored", nil)
 		)
 		q := r.URL.Query()
 		q.Set("dir", "/")
@@ -38,7 +39,7 @@ func TestDiskUsage(t *testing.T) {
 		const dir = "/this-directory-had-better-not-be-present-in-any-sort-of-test-environment"
 		var (
 			w = httptest.NewRecorder()
-			r = httptest.NewRequest("GET", "/ignored", nil)
+			r = httptest.NewRequestWithContext(context.Background(), "GET", "/ignored", nil)
 		)
 		q := r.URL.Query()
 		q.Set("dir", dir)
@@ -61,7 +62,7 @@ func TestDiskUsage(t *testing.T) {
 	t.Run("missing dir", func(t *testing.T) {
 		var (
 			w = httptest.NewRecorder()
-			r = httptest.NewRequest("GET", "/", nil)
+			r = httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
 		)
 
 		DiskUsage(w, r)
