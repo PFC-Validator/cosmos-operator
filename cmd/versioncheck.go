@@ -74,8 +74,21 @@ func VersionCheckCmd(scheme *runtime.Scheme) *cobra.Command {
 
 			cosmosFullNodeName := thisPod.Labels["app.kubernetes.io/name"]
 
+			// Resolve the CR kind from this pod's owner reference rather than
+			// assuming CosmosFullNode: in canary mode the owner is a
+			// CanaryCosmosFullNode, and this container does not inherit the
+			// operator deployment's OPERATOR_KIND env, so the default scheme
+			// would fetch the wrong kind and panic with not-found.
+			crScheme := scheme
+			if len(thisPod.OwnerReferences) > 0 && thisPod.OwnerReferences[0].Kind == cosmosv1.CanaryCosmosFullNodeKind {
+				crScheme = runtime.NewScheme()
+				if err = cosmosv1.CanaryAddToScheme(crScheme); err != nil {
+					panic(fmt.Errorf("failed to build canary scheme: %w", err))
+				}
+			}
+
 			kClient, err := client.New(config, client.Options{
-				Scheme: scheme,
+				Scheme: crScheme,
 			})
 			if err != nil {
 				panic(fmt.Errorf("failed to create kube client: %w", err))
