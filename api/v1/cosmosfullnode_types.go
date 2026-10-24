@@ -618,6 +618,18 @@ type ChainVersion struct {
 	// Determines if the node should forcefully halt at the upgrade height.
 	// +optional
 	SetHaltHeight bool `json:"setHaltHeight,omitempty"`
+
+	// Minimum number of seconds to wait after the chain reaches this version's
+	// upgrade height before the operator replaces the pod with the new image.
+	// This gives the old binary time to commit the upgrade-height block and, for
+	// on-chain software-proposal upgrades, write upgrade-info.json before the pod
+	// is deleted -- otherwise the new binary can start against a half-written
+	// store and panic with a store version mismatch. The hold is enforced per pod
+	// via an annotation; deletion happens on the first reconcile after the delay
+	// elapses, so the effective wait is at least this many seconds.
+	// +kubebuilder:validation:Minimum:=0
+	// +optional
+	UpgradeDelaySeconds uint64 `json:"upgradeDelaySeconds,omitempty"`
 }
 
 // CometConfig configures the config.toml.

@@ -3,7 +3,9 @@ package fullnode
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
+	"time"
 
 	cosmosv1 "github.com/bryanlabs/cosmos-operator/api/v1"
 	"github.com/bryanlabs/cosmos-operator/internal/diff"
@@ -1178,4 +1180,198 @@ func updatePod(t *testing.T, crdName string, ordinal int, pods []*corev1.Pod, up
 	}
 
 	require.FailNow(t, "pod not found", podName)
+}
+
+func TestUpgradeDelayFor(t *testing.T) {
+	t.Parallel()
+
+	crd := defaultCRD()
+	crd.Spec.ChainSpec = cosmosv1.ChainSpec{
+		Versions: []cosmosv1.ChainVersion{
+			{Image: "image"},
+			{UpgradeHeight: 100, Image: "new-image"},
+			{UpgradeHeight: 200, Image: "newer-image", UpgradeDelaySeconds: 45},
+			{UpgradeHeight: 300, Image: "future-image", UpgradeDelaySeconds: 120},
+		},
+	}
+
+	require.Zero(t, upgradeDelayFor(&crd, 50))  // before any upgrade height: no delay
+	require.Zero(t, upgradeDelayFor(&crd, 100)) // height 100 version has no delay configured
+	require.EqualValues(t, 45, upgradeDelayFor(&crd, 200))
+	require.EqualValues(t, 45, upgradeDelayFor(&crd, 250)) // future height 300 delay must not apply
+	require.EqualValues(t, 120, upgradeDelayFor(&crd, 300))
+	require.EqualValues(t, 120, upgradeDelayFor(&crd, 9999))
+
+	noVersions := defaultCRD()
+	require.Zero(t, upgradeDelayFor(&noVersions, 12345))
+}
+
+func TestUpgradeDelayReady(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	now := time.Now()
+	crd := defaultCRD()
+	crd.Spec.ChainSpec = cosmosv1.ChainSpec{
+		Versions: []cosmosv1.ChainVersion{
+			{Image: "image"},
+			{UpgradeHeight: 100, Image: "new-image", UpgradeDelaySeconds: 60},
+		},
+	}
+	height := uint64(100)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "hub-0"}}
+	mClient := newMockPodClient(nil)
+	pc := NewPodControl(mClient, nil)
+
+	t.Run("unknown height is never held", func(t *testing.T) {
+		ready, wait, err := pc.upgradeDelayReady(ctx, nopReporter, &crd, pod, nil, now)
+		require.True(t, ready)
+		require.Zero(t, wait)
+		require.NoError(t, err)
+	})
+
+	t.Run("nil pod is never held", func(t *testing.T) {
+		ready, _, err := pc.upgradeDelayReady(ctx, nopReporter, &crd, nil, &height, now)
+		require.True(t, ready)
+		require.NoError(t, err)
+	})
+
+	t.Run("no delay configured is never held", func(t *testing.T) {
+		plain := defaultCRD()
+		plain.Spec.ChainSpec = cosmosv1.ChainSpec{Versions: []cosmosv1.ChainVersion{{Image: "image"}}}
+		ready, _, err := pc.upgradeDelayReady(ctx, nopReporter, &plain, pod, &height, now)
+		require.True(t, ready)
+		require.NoError(t, err)
+	})
+
+	t.Run("arms the delay and holds the pod", func(t *testing.T) {
+		ready, wait, err := pc.upgradeDelayReady(ctx, nopReporter, &crd, pod, &height, now)
+		require.False(t, ready)
+		require.Equal(t, 60*time.Second, wait)
+		require.NoError(t, err)
+		require.Equal(t, 1, mClient.PatchCount)
+
+		armed := mClient.LastPatchObject.(*corev1.Pod)
+		v, ok := armed.Annotations[upgradeDelayKey]
+		require.True(t, ok)
+		deadline, perr := strconv.ParseInt(v, 10, 64)
+		require.NoError(t, perr)
+		require.Equal(t, now.Add(60*time.Second).Unix(), deadline)
+	})
+
+	t.Run("holds while the deadline is in the future", func(t *testing.T) {
+		armed := mClient.LastPatchObject.(*corev1.Pod)
+		ready, wait, err := pc.upgradeDelayReady(ctx, nopReporter, &crd, armed, &height, now.Add(30*time.Second))
+		require.False(t, ready)
+		// Deadlines are unix-second granular, so the remaining wait is 30s-ish.
+		require.InDelta(t, 30.0, wait.Seconds(), 1.0)
+		require.NoError(t, err)
+		// Held pods are not re-armed.
+		require.Equal(t, 1, mClient.PatchCount)
+	})
+
+	t.Run("releases once the deadline has passed", func(t *testing.T) {
+		armed := mClient.LastPatchObject.(*corev1.Pod)
+		ready, _, err := pc.upgradeDelayReady(ctx, nopReporter, &crd, armed, &height, now.Add(61*time.Second))
+		require.True(t, ready)
+		require.NoError(t, err)
+	})
+
+	t.Run("corrupt deadline re-arms instead of trusting it", func(t *testing.T) {
+		corrupt := mClient.LastPatchObject.(*corev1.Pod).DeepCopy()
+		corrupt.Annotations[upgradeDelayKey] = "not-a-timestamp"
+		before := mClient.PatchCount
+		ready, _, err := pc.upgradeDelayReady(ctx, nopReporter, &crd, corrupt, &height, now)
+		require.False(t, ready)
+		require.NoError(t, err)
+		require.Equal(t, before+1, mClient.PatchCount)
+	})
+}
+
+func TestPodControlReconcileUpgradeDelay(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const namespace = "test"
+
+	// Two healthy pods whose height has crossed into a version configured with
+	// upgradeDelaySeconds. Desired image for height 100 is "new-image" while the
+	// existing pods still run "image", so every reconcile sees a version upgrade.
+	newSetup := func() (*cosmosv1.CosmosFullNode, *mockPodClient, map[string]*cosmosv1.SyncInfoPodStatus, PodControl) {
+		crd := defaultCRD()
+		crd.Name = "hub"
+		crd.Namespace = namespace
+		crd.Spec.Replicas = 2
+		crd.Spec.ChainSpec = cosmosv1.ChainSpec{
+			Versions: []cosmosv1.ChainVersion{
+				{Image: "image"},
+				{UpgradeHeight: 100, Image: "new-image", UpgradeDelaySeconds: 60},
+			},
+		}
+		crd.Status.Height = make(map[string]uint64)
+
+		pods, err := BuildPods(&crd, nil)
+		require.NoError(t, err)
+		existing := diff.New(nil, pods).Creates()
+
+		mClient := newMockPodClient(existing)
+		syncInfo := map[string]*cosmosv1.SyncInfoPodStatus{
+			"hub-0": {Height: ptr(uint64(100)), InSync: ptr(true)},
+			"hub-1": {Height: ptr(uint64(100)), InSync: ptr(true)},
+		}
+		for _, pod := range existing {
+			crd.Status.Height[pod.Name] = 100
+		}
+
+		return &crd, mClient, syncInfo, NewPodControl(mClient, nil)
+	}
+
+	t.Run("holds version upgrade deletion while the delay is armed", func(t *testing.T) {
+		crd, mClient, syncInfo, control := newSetup()
+
+		requeue, err := control.Reconcile(ctx, nopReporter, crd, nil, syncInfo)
+		require.NoError(t, err)
+		require.True(t, requeue)                // updates remain pending
+		require.Zero(t, mClient.DeleteCount)    // nothing was deleted
+		require.Equal(t, 2, mClient.PatchCount) // both pods armed
+
+		armed := mClient.LastPatchObject.(*corev1.Pod)
+		require.Contains(t, armed.Annotations, upgradeDelayKey)
+	})
+
+	t.Run("proceeds once the deadline has elapsed", func(t *testing.T) {
+		crd, mClient, syncInfo, control := newSetup()
+
+		// Pre-arm both pods with an elapsed deadline, as a previous reconcile would have.
+		items := mClient.ObjectList.(corev1.PodList).Items
+		past := strconv.FormatInt(time.Now().Add(-time.Minute).Unix(), 10)
+		armed := make([]*corev1.Pod, len(items))
+		for i := range items {
+			p := items[i].DeepCopy()
+			if p.Annotations == nil {
+				p.Annotations = make(map[string]string)
+			}
+			p.Annotations[upgradeDelayKey] = past
+			armed[i] = p
+		}
+		mClient.setPods(armed)
+
+		requeue, err := control.Reconcile(ctx, nopReporter, crd, nil, syncInfo)
+		require.NoError(t, err)
+		require.True(t, requeue)
+		// All reachable and in sync: rollout allows one unavailable of two.
+		require.Equal(t, 1, mClient.DeleteCount)
+	})
+
+	t.Run("holds an unreachable pod on the immediate-delete path", func(t *testing.T) {
+		crd, mClient, syncInfo, control := newSetup()
+
+		// hub-0 halted at the upgrade height: RPC gone, height still reported.
+		syncInfo["hub-0"].InSync = nil
+		syncInfo["hub-0"].Error = ptr("no dial")
+
+		requeue, err := control.Reconcile(ctx, nopReporter, crd, nil, syncInfo)
+		require.NoError(t, err)
+		require.True(t, requeue)
+		require.Zero(t, mClient.DeleteCount) // the unreachable pod was NOT deleted
+	})
 }
