@@ -372,3 +372,39 @@ func TestBuildServices(t *testing.T) {
 		return labels
 	})
 }
+
+func TestBuildServicesP2PExternalTrafficPolicy(t *testing.T) {
+	t.Parallel()
+
+	t.Run("p2p template ClusterIP leaves externalTrafficPolicy unset", func(t *testing.T) {
+		crd := defaultCRD()
+		crd.Spec.Replicas = 1
+		crd.Name = "terra"
+		crd.Namespace = "test"
+		crd.Spec.ChainSpec.Network = "testnet"
+		crd.Spec.PodTemplate.Image = "terra:v6.0.0"
+		crd.Spec.Service.P2PTemplate.Type = ptr(corev1.ServiceTypeClusterIP)
+
+		svcs := BuildServices(&crd)
+		require.Equal(t, 2, len(svcs)) // 1 p2p + 1 rpc
+
+		p2p := svcs[0].Object()
+		require.Equal(t, "terra-p2p-0", p2p.Name)
+		require.Equal(t, corev1.ServiceTypeClusterIP, p2p.Spec.Type)
+		require.Empty(t, p2p.Spec.ExternalTrafficPolicy)
+	})
+
+	t.Run("p2p template LoadBalancer still defaults externalTrafficPolicy to Local", func(t *testing.T) {
+		crd := defaultCRD()
+		crd.Spec.Replicas = 1
+		crd.Name = "terra"
+		crd.Namespace = "test"
+		crd.Spec.ChainSpec.Network = "testnet"
+		crd.Spec.PodTemplate.Image = "terra:v6.0.0"
+
+		svcs := BuildServices(&crd)
+		p2p := svcs[0].Object()
+		require.Equal(t, corev1.ServiceTypeLoadBalancer, p2p.Spec.Type)
+		require.Equal(t, corev1.ServiceExternalTrafficPolicyTypeLocal, p2p.Spec.ExternalTrafficPolicy)
+	})
+}
