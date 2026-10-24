@@ -812,27 +812,27 @@ func TestResolveOperatorImage(t *testing.T) {
 	t.Run("defaults to the historical repo", func(t *testing.T) {
 		reset()
 		t.Setenv("OPERATOR_IMAGE_REPO", "")
-		require.True(t, strings.HasPrefix(resolveOperatorImage(), "ghcr.io/pfc-validator/cosmos-operator:"))
+		require.True(t, strings.HasPrefix(resolveOperatorImage(nil), "ghcr.io/pfc-validator/cosmos-operator:"))
 	})
 
 	t.Run("honors the override so CI and the operator can disagree on repo name", func(t *testing.T) {
 		reset()
 		t.Setenv("OPERATOR_IMAGE_REPO", "ghcr.io/pfc-validator/cosmos-operator-contrib")
-		require.True(t, strings.HasPrefix(resolveOperatorImage(), "ghcr.io/pfc-validator/cosmos-operator-contrib:"))
+		require.True(t, strings.HasPrefix(resolveOperatorImage(nil), "ghcr.io/pfc-validator/cosmos-operator-contrib:"))
 	})
 
 	t.Run("prefers a discovered repo over the compiled default", func(t *testing.T) {
 		reset()
 		t.Setenv("OPERATOR_IMAGE_REPO", "")
 		SetOperatorImageRepo("ghcr.io/someone/their-fork")
-		require.True(t, strings.HasPrefix(resolveOperatorImage(), "ghcr.io/someone/their-fork:"))
+		require.True(t, strings.HasPrefix(resolveOperatorImage(nil), "ghcr.io/someone/their-fork:"))
 	})
 
 	t.Run("env var wins over discovery", func(t *testing.T) {
 		reset()
 		SetOperatorImageRepo("ghcr.io/someone/their-fork")
 		t.Setenv("OPERATOR_IMAGE_REPO", "ghcr.io/explicit/pin")
-		require.True(t, strings.HasPrefix(resolveOperatorImage(), "ghcr.io/explicit/pin:"))
+		require.True(t, strings.HasPrefix(resolveOperatorImage(nil), "ghcr.io/explicit/pin:"))
 	})
 
 	t.Run("a failed discovery does not erase a good value", func(t *testing.T) {
@@ -840,29 +840,45 @@ func TestResolveOperatorImage(t *testing.T) {
 		t.Setenv("OPERATOR_IMAGE_REPO", "")
 		SetOperatorImageRepo("ghcr.io/someone/their-fork")
 		SetOperatorImageRepo("")
-		require.True(t, strings.HasPrefix(resolveOperatorImage(), "ghcr.io/someone/their-fork:"))
+		require.True(t, strings.HasPrefix(resolveOperatorImage(nil), "ghcr.io/someone/their-fork:"))
+	})
+
+	t.Run("per-CR pin wins over env var and discovery", func(t *testing.T) {
+		reset()
+		t.Setenv("OPERATOR_IMAGE_REPO", "ghcr.io/explicit/pin")
+		SetOperatorImage(pinned)
+		crd := defaultCRD()
+		crd.Spec.InjectedImages = &cosmosv1.InjectedImagesSpec{Operator: ptr("ghcr.io/someone/their-fork:v1.9.9@sha256:deadbeef")}
+		require.Equal(t, "ghcr.io/someone/their-fork:v1.9.9@sha256:deadbeef", resolveOperatorImage(&crd))
+	})
+
+	t.Run("per-CR pin absent leaves resolution untouched", func(t *testing.T) {
+		reset()
+		t.Setenv("OPERATOR_IMAGE_REPO", "ghcr.io/explicit/pin")
+		crd := defaultCRD()
+		require.True(t, strings.HasPrefix(resolveOperatorImage(&crd), "ghcr.io/explicit/pin:"))
 	})
 
 	t.Run("reuses a digest-pinned operator image as is", func(t *testing.T) {
 		reset()
 		t.Setenv("OPERATOR_IMAGE_REPO", "")
 		SetOperatorImage(pinned)
-		require.Equal(t, pinned, resolveOperatorImage())
+		require.Equal(t, pinned, resolveOperatorImage(nil))
 	})
 
 	t.Run("a tag-only operator image still contributes its repo", func(t *testing.T) {
 		reset()
 		t.Setenv("OPERATOR_IMAGE_REPO", "")
 		SetOperatorImage("ghcr.io/someone/their-fork:v1.2.3")
-		require.True(t, strings.HasPrefix(resolveOperatorImage(), "ghcr.io/someone/their-fork:"))
-		require.NotContains(t, resolveOperatorImage(), "@")
+		require.True(t, strings.HasPrefix(resolveOperatorImage(nil), "ghcr.io/someone/their-fork:"))
+		require.NotContains(t, resolveOperatorImage(nil), "@")
 	})
 
 	t.Run("env var wins over a pinned image", func(t *testing.T) {
 		reset()
 		SetOperatorImage(pinned)
 		t.Setenv("OPERATOR_IMAGE_REPO", "ghcr.io/explicit/pin")
-		require.True(t, strings.HasPrefix(resolveOperatorImage(), "ghcr.io/explicit/pin:"))
+		require.True(t, strings.HasPrefix(resolveOperatorImage(nil), "ghcr.io/explicit/pin:"))
 	})
 }
 

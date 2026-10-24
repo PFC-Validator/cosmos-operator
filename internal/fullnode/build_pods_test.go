@@ -250,3 +250,50 @@ func TestBuildPods(t *testing.T) {
 		require.Equal(t, want, got)
 	})
 }
+
+func TestBuildPodsInjectedImagePins(t *testing.T) {
+	t.Parallel()
+
+	opPin := "ghcr.io/pfc-validator/cosmos-operator:v0.26.4-pfc@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	toolPin := "ghcr.io/pfc-validator/infra-toolkit:v0.2.0@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+
+	crd := &cosmosv1.CosmosFullNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agoric",
+			Namespace: "test",
+		},
+		Spec: cosmosv1.FullNodeSpec{
+			Replicas:    1,
+			ChainSpec:   cosmosv1.ChainSpec{Network: "devnet"},
+			PodTemplate: cosmosv1.PodSpec{Image: "busybox:latest"},
+			InjectedImages: &cosmosv1.InjectedImagesSpec{
+				Operator:     &opPin,
+				InfraToolkit: &toolPin,
+			},
+		},
+	}
+
+	pods, err := BuildPods(crd, nil)
+	require.NoError(t, err)
+	require.Len(t, pods, 1)
+
+	pod := pods[0].Object()
+
+	// Healthcheck sidecar carries the operator pin.
+	var health *corev1.Container
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == "healthcheck" {
+			health = &pod.Spec.Containers[i]
+		}
+	}
+	require.NotNil(t, health)
+	require.Equal(t, opPin, health.Image)
+
+	// Init containers: every infra-toolkit stamp becomes the pin, the
+	// version-check stamp becomes the operator pin, and no default
+	// infra-toolkit ref survives.
+	gotInit := lo.Map(pod.Spec.InitContainers, func(c corev1.Container, _ int) string { return c.Image })
+	require.NotContains(t, gotInit, infraToolImage)
+	require.Contains(t, gotInit, toolPin)
+	require.Contains(t, gotInit, opPin)
+}

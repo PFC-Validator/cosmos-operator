@@ -117,9 +117,35 @@ type FullNodeSpec struct {
 	// +optional
 	SelfHeal *SelfHealSpec `json:"selfHeal"`
 
+	// InjectedImages overrides the images the operator injects into this CosmosFullNode's
+	// pods: the version-check and healthcheck containers (the operator's own image) and
+	// the init containers (infra-toolkit). Unset fields fall back to the operator defaults.
+	//
+	// Pinning exists to pace fleet-wide operator upgrades, which otherwise roll every
+	// chain at once because the injected refs are part of the pod template hash: pin all
+	// CosmosFullNodes to the currently running refs, swap the operator image (pinned
+	// pods do not roll), then remove pins one CosmosFullNode at a time to roll each
+	// chain onto the new defaults at whatever cadence you choose.
+	// +optional
+	InjectedImages *InjectedImagesSpec `json:"injectedImages"`
+
 	// If set, the pod will use the specified service account. If not set, pods will create and use an isolated service account.
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName"`
+}
+
+// InjectedImagesSpec overrides the operator-injected container images for a single
+// CosmosFullNode. Values are full image references; digest-pinning is recommended.
+type InjectedImagesSpec struct {
+	// Operator overrides the image used for the version-check and healthcheck
+	// containers. Normally the operator's own image, resolved at runtime.
+	// +optional
+	Operator *string `json:"operator"`
+
+	// InfraToolkit overrides the image used for the init containers (clean-init,
+	// genesis-init, addrbook-init, config-merge, snapshot-restore).
+	// +optional
+	InfraToolkit *string `json:"infraToolkit"`
 }
 
 type FullNodeType string

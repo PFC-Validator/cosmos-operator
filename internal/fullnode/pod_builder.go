@@ -97,7 +97,7 @@ func NewPodBuilder(crd *cosmosv1.CosmosFullNode) PodBuilder {
 					Name: "healthcheck",
 					// Available images: https://github.com/orgs/strangelove-ventures/packages?repo_name=cosmos-operator
 					// IMPORTANT: Must use v0.6.2 or later.
-					Image:   resolveOperatorImage(),
+					Image:   resolveOperatorImage(crd),
 					Command: []string{"/manager", "healthcheck", "--rpc-host", fmt.Sprintf("http://localhost:%d", crd.Spec.ChainSpec.Comet.RPCPort())},
 					Ports:   []corev1.ContainerPort{{ContainerPort: healthCheckPort, Protocol: corev1.ProtocolTCP}},
 					Resources: corev1.ResourceRequirements{
@@ -117,7 +117,7 @@ func NewPodBuilder(crd *cosmosv1.CosmosFullNode) PodBuilder {
 		// version check sidecar, runs on inverval in case the instance is halting for upgrade.
 		pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{
 			Name:    "version-check-interval",
-			Image:   resolveOperatorImage(),
+			Image:   resolveOperatorImage(crd),
 			Command: versionCheckCmd,
 			Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
@@ -354,7 +354,12 @@ func envVars(crd *cosmosv1.CosmosFullNode) []corev1.EnvVar {
 	}
 }
 
-func resolveInfraToolImage() string {
+// resolveInfraToolImage returns the infra-toolkit image for crd's init containers:
+// the per-CR injectedImages pin when set, else the compiled-in default.
+func resolveInfraToolImage(crd *cosmosv1.CosmosFullNode) string {
+	if crd != nil && crd.Spec.InjectedImages != nil && crd.Spec.InjectedImages.InfraToolkit != nil {
+		return *crd.Spec.InjectedImages.InfraToolkit
+	}
 	return infraToolImage
 }
 
@@ -414,6 +419,8 @@ func RepoFromImageRef(image string) string {
 
 // resolveOperatorImage picks the repository for version-check containers, in order:
 //
+//  0. the CosmosFullNode's spec.injectedImages.operator pin, returned verbatim, so
+//     fleet upgrades can be paced per-CR (pinned pods hold their current template)
 //  1. OPERATOR_IMAGE_REPO, so an operator can always pin it explicitly
 //  2. the running operator's own digest-pinned reference, used as is
 //  3. the repository the running operator image came from, discovered at startup
@@ -421,7 +428,10 @@ func RepoFromImageRef(image string) string {
 //
 // Getting this wrong makes every managed pod request a tag that does not exist, so the discovery
 // step exists to stop that being the default outcome for anyone running a fork.
-func resolveOperatorImage() string {
+func resolveOperatorImage(crd *cosmosv1.CosmosFullNode) string {
+	if crd != nil && crd.Spec.InjectedImages != nil && crd.Spec.InjectedImages.Operator != nil {
+		return *crd.Spec.InjectedImages.Operator
+	}
 	repo := os.Getenv("OPERATOR_IMAGE_REPO")
 	if repo == "" {
 		if ref, ok := discoveredOperatorImageRef.Load().(string); ok {
@@ -451,7 +461,7 @@ func initContainers(crd *cosmosv1.CosmosFullNode, moniker string) []corev1.Conta
 	required := []corev1.Container{
 		{
 			Name:            "clean-init",
-			Image:           resolveInfraToolImage(),
+			Image:           resolveInfraToolImage(crd),
 			Command:         []string{"sh"},
 			Args:            []string{"-c", `rm -rf "$HOME/.tmp/*"`},
 			Env:             env,
@@ -483,7 +493,7 @@ echo "Initializing into tmp dir for downstream processing..."
 
 		{
 			Name:            "genesis-init",
-			Image:           resolveInfraToolImage(),
+			Image:           resolveInfraToolImage(crd),
 			Command:         []string{genesisCmd},
 			Args:            genesisArgs,
 			Env:             env,
@@ -492,7 +502,7 @@ echo "Initializing into tmp dir for downstream processing..."
 		},
 		{
 			Name:            "addrbook-init",
-			Image:           resolveInfraToolImage(),
+			Image:           resolveInfraToolImage(crd),
 			Command:         []string{addrbookCmd},
 			Args:            addrbookArgs,
 			Env:             env,
@@ -501,7 +511,7 @@ echo "Initializing into tmp dir for downstream processing..."
 		},
 		{
 			Name:    "config-merge",
-			Image:   resolveInfraToolImage(),
+			Image:   resolveInfraToolImage(crd),
 			Command: []string{"sh"},
 			Args: []string{"-c",
 				`
@@ -539,7 +549,7 @@ fi
 		cmd, args := DownloadSnapshotCommand(crd.Spec.ChainSpec)
 		required = append(required, corev1.Container{
 			Name:            "snapshot-restore",
-			Image:           resolveInfraToolImage(),
+			Image:           resolveInfraToolImage(crd),
 			Command:         []string{cmd},
 			Args:            args,
 			Env:             env,
@@ -560,7 +570,7 @@ fi
 	// After the status is patched, the pod will be restarted with the correct image.
 	required = append(required, corev1.Container{
 		Name:    "version-check",
-		Image:   resolveOperatorImage(),
+		Image:   resolveOperatorImage(crd),
 		Command: versionCheckCmd,
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
