@@ -328,7 +328,7 @@ const (
 	nodeKeyDir   = workDir + "/.node-key"
 	// Pinned by digest so a reschedule can never pull different code. Bump the tag and digest
 	// together, taking the digest from `crane digest`.
-	infraToolImage = "ghcr.io/pfc-validator/infra-toolkit:v0.2.0"
+	infraToolImage = "ghcr.io/pfc-validator/infra-toolkit:v0.2.2"
 
 	// Necessary for statesync
 	systemTmpDir = "/tmp"
