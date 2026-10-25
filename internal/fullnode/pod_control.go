@@ -3,6 +3,8 @@ package fullnode
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"time"
 
 	cosmosv1 "github.com/bryanlabs/cosmos-operator/api/v1"
 	"github.com/bryanlabs/cosmos-operator/internal/diff"
@@ -41,6 +43,83 @@ func NewPodControl(client Client, cacheInvalidator CacheInvalidator) PodControl 
 		cacheInvalidator: cacheInvalidator,
 		computeRollout:   kube.ComputeRollout,
 	}
+}
+
+// upgradeDelayKey annotates a pod whose version-upgrade deletion is being held
+// back by spec.chain.versions[].upgradeDelaySeconds. Value is the unix timestamp
+// after which deletion may proceed. The annotation dies with the pod it holds.
+const upgradeDelayKey = "cosmos.strange.love/upgrade-delete-after"
+
+// heightOf returns the last reported height for podName, if any.
+func heightOf(syncInfo map[string]*cosmosv1.SyncInfoPodStatus, podName string) *uint64 {
+	if si, ok := syncInfo[podName]; ok {
+		return si.Height
+	}
+	return nil
+}
+
+// upgradeDelayFor returns the upgradeDelaySeconds of the version the chain has
+// reached: the highest version whose upgrade height is at or below the current
+// height. Returns 0 when no delay applies.
+func upgradeDelayFor(crd *cosmosv1.CosmosFullNode, current uint64) uint64 {
+	var delay uint64
+	for _, v := range crd.Spec.ChainSpec.Versions {
+		if v.UpgradeHeight <= current && v.UpgradeDelaySeconds > delay {
+			delay = v.UpgradeDelaySeconds
+		}
+	}
+	return delay
+}
+
+// upgradeDelayReady reports whether pod's version-upgrade deletion may proceed.
+// If the applicable version configures an upgradeDelaySeconds and the hold has
+// not elapsed, it arms (or reads) the pod's upgrade-delete-after annotation and
+// returns false with the remaining wait. A pod whose current height is unknown,
+// or a version without a delay, is never held.
+func (pc PodControl) upgradeDelayReady(
+	ctx context.Context,
+	reporter kube.Reporter,
+	crd *cosmosv1.CosmosFullNode,
+	pod *corev1.Pod,
+	current *uint64,
+	now time.Time,
+) (bool, time.Duration, kube.ReconcileError) {
+	if pod == nil || current == nil || *current == 0 {
+		return true, 0, nil
+	}
+	delay := upgradeDelayFor(crd, *current)
+	if delay == 0 {
+		return true, 0, nil
+	}
+	if v, ok := pod.Annotations[upgradeDelayKey]; ok {
+		if ts, err := strconv.ParseInt(v, 10, 64); err == nil {
+			remaining := time.Unix(ts, 0).Sub(now)
+			if remaining > 0 {
+				reporter.Info("Holding pod for upgrade delay",
+					"name", pod.Name,
+					"remaining", remaining.String(),
+				)
+				return false, remaining, nil
+			}
+			return true, 0, nil
+		}
+		// Unreadable deadline: fall through and re-arm.
+	}
+	hold := pod.DeepCopy()
+	if hold.Annotations == nil {
+		hold.Annotations = make(map[string]string)
+	}
+	deadline := now.Add(time.Duration(delay) * time.Second)
+	hold.Annotations[upgradeDelayKey] = strconv.FormatInt(deadline.Unix(), 10)
+	if err := pc.client.Patch(ctx, hold, client.MergeFrom(pod)); err != nil {
+		return true, 0, kube.TransientError(fmt.Errorf("arm upgrade delay on pod %q: %w", pod.Name, err))
+	}
+	reporter.Info("Arming upgrade delay",
+		"name", pod.Name,
+		"delay", time.Duration(delay)*time.Second,
+		"deadline", deadline,
+	)
+	return false, time.Duration(delay) * time.Second, nil
 }
 
 // Reconcile is the control loop for pods. The bool return value, if true, indicates the controller should requeue
@@ -170,6 +249,15 @@ func (pc PodControl) Reconcile(
 			for _, update := range mainPodsToUpdate {
 				if podName == update.Name {
 					if existing.Spec.Containers[0].Image != update.Spec.Containers[0].Image {
+						// Version upgrade pending: honor any configured upgrade delay
+						// before this pod may be deleted on either path below.
+						ready, _, rerr := pc.upgradeDelayReady(ctx, reporter, crd, &existing, heightOf(syncInfo, podName), time.Now())
+						if rerr != nil {
+							return true, rerr
+						}
+						if !ready {
+							break // hold this pod; other pods may still proceed.
+						}
 						// awaiting version upgrade
 						if !rpcReachable {
 							updatedPods++
@@ -243,6 +331,20 @@ func (pc PodControl) Reconcile(
 		// process upgrade updates first
 		for _, pod := range otherUpdatesVersionMismatch {
 			podName := pod.Name
+			var live *corev1.Pod
+			for i := range pods.Items {
+				if pods.Items[i].Name == podName {
+					live = &pods.Items[i]
+					break
+				}
+			}
+			ready, _, rerr := pc.upgradeDelayReady(ctx, reporter, crd, live, heightOf(syncInfo, podName), time.Now())
+			if rerr != nil {
+				return true, rerr
+			}
+			if !ready {
+				continue // hold this pod; other pods may still proceed.
+			}
 			fmt.Printf("Deleting reachable main pod for version upgrade after numupdates, name: %s\n", podName) // TODO: remove
 			reporter.Info("Deleting pod for update", "name", podName)
 			// Because we should watch for deletes, we get a re-queued request, detect pod is missing, and re-create it.
