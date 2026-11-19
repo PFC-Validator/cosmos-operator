@@ -45,9 +45,10 @@ Branch `codex/cosmos-operator-v0.25.1-manifest` (safety copy: `backup-bryanlabs-
 - `config/` — CRD bases, manager Deployment, RBAC, samples. `docs/` — architecture + runbooks.
 
 ## Build & deploy
-- `Dockerfile`: 3-stage (rocksdb libs, then `golang:1.23-alpine` CGO build with `rocksdb pebbledb`
-  build tags, then `scratch`). Version injected via ldflags into `internal/version`.
-  `local.Dockerfile` is the native-arch dev build.
+- `Dockerfile` builds the manager with Go 1.27.4, CGO and the `pebbledb` tag, then copies it
+  into a `scratch` image. The build sets `internal/version` via ldflags.
+  `local.Dockerfile` uses the same Go version for the native-architecture build with RocksDB and PebbleDB.
+  CI reads the Go version from `go.mod`.
 - Image `ghcr.io/bryanlabs/cosmos-operator`. Build amd64 with `--builder worker1`
   (the shared BuildKit on worker-1; see the `image-build` skill).
 - Make targets: `make manifests generate test build`, `make docker-build` / `docker-push`,
